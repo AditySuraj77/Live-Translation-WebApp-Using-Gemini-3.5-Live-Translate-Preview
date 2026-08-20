@@ -1,0 +1,193 @@
+/**
+ * PeerManager — WebRTC peer connection with SSE-based signaling.
+ */
+
+type Role = "caller" | "callee";
+
+interface SignalEvent {
+  type: "offer" | "answer" | "ice";
+  payload: unknown;
+  from: Role;
+}
+
+const STUN_SERVERS: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+];
+
+export class PeerManager {
+  private pc: RTCPeerConnection;
+  private roomId: string;
+  private role: Role;
+  private sse: EventSource | null = null;
+  private pendingCandidates: RTCIceCandidateInit[] = [];
+  private _onRemoteStream?: (stream: MediaStream) => void;
+  private _onStatusChange?: (status: string) => void;
+
+  constructor(roomId: string, role: Role) {
+    this.roomId = roomId;
+    this.role = role;
+    this.pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+
+    this.pc.onicecandidate = ({ candidate }) => {
+      if (candidate) {
+        console.log(`[WebRTC (${this.role})] Local ICE candidate generated`);
+        this._postSignal("ice", candidate.toJSON());
+      }
+    };
+
+    this.pc.ontrack = (event) => {
+      console.log(`[WebRTC (${this.role})] Remote track received!`, event.streams);
+      if (event.streams?.[0]) {
+        this._onRemoteStream?.(event.streams[0]);
+      }
+    };
+
+    this.pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC (${this.role})] ICE connection state: ${this.pc.iceConnectionState}`);
+      this._onStatusChange?.(this.pc.iceConnectionState);
+    };
+
+    this.pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC (${this.role})] Connection state: ${this.pc.connectionState}`);
+      this._onStatusChange?.(this.pc.connectionState);
+    };
+  }
+
+  /** Add the Gemini-translated audio stream as the outgoing track */
+  addTranslatedTrack(stream: MediaStream): void {
+    const tracks = stream.getAudioTracks();
+    console.log(`[WebRTC (${this.role})] Adding ${tracks.length} audio track(s)`);
+    for (const track of tracks) {
+      this.pc.addTrack(track, stream);
+    }
+  }
+
+  onRemoteStream(cb: (stream: MediaStream) => void): void {
+    this._onRemoteStream = cb;
+  }
+
+  onStatusChange(cb: (status: string) => void): void {
+    this._onStatusChange = cb;
+  }
+
+  /** Start signaling — opens SSE and begins offer/answer exchange */
+  async start(): Promise<void> {
+    this._openSSE();
+
+    if (this.role === "caller") {
+      await this._createAndPostOffer();
+    }
+  }
+
+  private _openSSE(): void {
+    const url = `/api/signal/stream?roomId=${encodeURIComponent(this.roomId)}`;
+    console.log(`[WebRTC (${this.role})] Connecting SSE to ${url}`);
+    this.sse = new EventSource(url);
+
+    this.sse.onmessage = async (event) => {
+      try {
+        const signal: SignalEvent = JSON.parse(event.data);
+        await this._handleSignal(signal);
+      } catch (e) {
+        console.error("[WebRTC] Error parsing SSE event:", e);
+      }
+    };
+
+    this.sse.onerror = (err) => {
+      console.warn("[WebRTC] SSE connection error:", err);
+    };
+  }
+
+  private async _handleSignal(signal: SignalEvent): Promise<void> {
+    // Ignore self messages
+    if (signal.from === this.role) return;
+
+    console.log(`[WebRTC (${this.role})] Received: ${signal.type} from ${signal.from}`);
+
+    if (signal.type === "offer" && this.role === "callee") {
+      try {
+        if (this.pc.signalingState !== "stable" && this.pc.signalingState !== "have-local-offer") {
+          // If already in have-remote-offer, re-creating answer
+        }
+        await this.pc.setRemoteDescription(
+          new RTCSessionDescription(signal.payload as RTCSessionDescriptionInit)
+        );
+        console.log(`[WebRTC (callee)] Remote offer set. Creating answer...`);
+
+        // Drain pending candidates
+        for (const c of this.pendingCandidates) {
+          await this.pc.addIceCandidate(new RTCIceCandidate(c));
+        }
+        this.pendingCandidates = [];
+
+        const answer = await this.pc.createAnswer();
+        await this.pc.setLocalDescription(answer);
+        console.log(`[WebRTC (callee)] Local answer set. Posting answer...`);
+        await this._postSignal("answer", answer);
+      } catch (err) {
+        console.error("[WebRTC (callee)] Failed to handle offer:", err);
+      }
+    }
+
+    if (signal.type === "answer" && this.role === "caller") {
+      try {
+        if (this.pc.signalingState === "have-local-offer") {
+          await this.pc.setRemoteDescription(
+            new RTCSessionDescription(signal.payload as RTCSessionDescriptionInit)
+          );
+          console.log(`[WebRTC (caller)] Remote answer set successfully.`);
+
+          // Drain pending candidates
+          for (const c of this.pendingCandidates) {
+            await this.pc.addIceCandidate(new RTCIceCandidate(c));
+          }
+          this.pendingCandidates = [];
+        }
+      } catch (err) {
+        console.error("[WebRTC (caller)] Failed to set remote answer:", err);
+      }
+    }
+
+    if (signal.type === "ice") {
+      const candidateInit = signal.payload as RTCIceCandidateInit;
+      try {
+        if (this.pc.remoteDescription && this.pc.remoteDescription.type) {
+          await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
+        } else {
+          this.pendingCandidates.push(candidateInit);
+        }
+      } catch (e) {
+        console.warn("[WebRTC] ICE candidate error:", e);
+      }
+    }
+  }
+
+  private async _createAndPostOffer(): Promise<void> {
+    try {
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+      await this._postSignal("offer", offer);
+    } catch (err) {
+      console.error("[WebRTC (caller)] Error creating offer:", err);
+    }
+  }
+
+  private async _postSignal(type: SignalEvent["type"], payload: unknown): Promise<void> {
+    try {
+      await fetch("/api/signal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomId: this.roomId, type, payload, from: this.role }),
+      });
+    } catch (e) {
+      console.error(`[WebRTC (${this.role})] Failed to POST signal ${type}:`, e);
+    }
+  }
+
+  close(): void {
+    this.sse?.close();
+    this.pc.close();
+  }
+}

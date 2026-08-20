@@ -1,36 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+﻿# LiveTranslate MVP
 
-## Getting Started
+Real-time 1-to-1 voice translation using Gemini Live API + WebRTC.
 
-First, run the development server:
+## Prerequisites
+
+- Node.js 18+
+- A Gemini API key with access to `gemini-3.5-live-translate-preview`
+  - Get one at: https://aistudio.google.com/apikey
+
+## Environment Variables
+
+Copy `.env.local.example` to `.env.local` and fill in your key:
+
+```
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+## Start the Development Server
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Testing Hindi ↔ English Translation
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Open **two browser tabs** at http://localhost:3000
 
-## Learn More
+**Tab 1 (Caller — speaks Hindi):**
+- Select "I speak: Hindi" and "They speak: English"
+- Click **Create Room**
+- Copy the 6-character Room ID shown on screen
 
-To learn more about Next.js, take a look at the following resources:
+**Tab 2 (Callee — speaks English):**
+- Paste the Room ID
+- Select "I speak: English" and "They speak: Hindi"
+- Click **Join Room**
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+3. Allow microphone access in both tabs
+4. Wait for status to show **Connected**
+5. Speak in Hindi in Tab 1 → Tab 2 hears English translation
+6. Speak in English in Tab 2 → Tab 1 hears Hindi translation
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Architecture
 
-## Deploy on Vercel
+```
+Browser A mic → AudioWorklet (16kHz PCM) → Gemini Live (translationConfig: targetLanguageCode: "en")
+             → translated PCM → MediaStreamDestinationNode → WebRTC → Browser B speaker
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Browser B mic → AudioWorklet (16kHz PCM) → Gemini Live (translationConfig: targetLanguageCode: "hi")
+             → translated PCM → MediaStreamDestinationNode → WebRTC → Browser A speaker
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Signaling: SSE (GET /api/signal/stream) + HTTP POST (/api/signal)
+- No audio goes through the server — WebRTC is peer-to-peer
+- Gemini model: `gemini-3.5-live-translate-preview` (fallback: `gemini-2.5-flash-native-audio-preview-12-2025`)
+
+## Known Limitations
+
+- STUN only — may not work across different networks (no TURN server)
+- In-memory signaling state resets on server restart
+- Only English and Hindi supported (add more in `lib/languages.ts`)
+- Preview model — subject to Google API quota limits
+- Must be tested in Chromium-based browsers (AudioWorklet + WebRTC support)
