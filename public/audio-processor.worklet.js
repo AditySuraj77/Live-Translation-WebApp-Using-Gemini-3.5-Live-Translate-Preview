@@ -82,18 +82,19 @@ class AudioProcessor extends AudioWorkletProcessor {
     while (this._buffer.length >= this._chunkSize) {
       const chunk = this._buffer.splice(0, this._chunkSize);
       
-      // Calculate RMS energy for noise gate
+      // Calculate RMS energy for UI speaking indicator (speech activity detection)
       let sumSq = 0;
       for (let i = 0; i < chunk.length; i++) {
         sumSq += chunk[i] * chunk[i];
       }
       const rms = Math.sqrt(sumSq / chunk.length);
+      const isSpeech = rms >= 0.006;
 
-      // Gate out faint ambient noise / room speaker bleed (< 0.008 RMS)
-      const isSpeech = rms >= 0.008;
+      // Convert Float32 directly to Int16 PCM without hard-cutting samples to zeros
+      // This allows Gemini Live native VAD to follow continuous Hindi/English speech natural pauses
       const int16 = new Int16Array(chunk.length);
       for (let i = 0; i < chunk.length; i++) {
-        const s = isSpeech ? Math.max(-1, Math.min(1, chunk[i])) : 0;
+        const s = Math.max(-1, Math.min(1, chunk[i]));
         int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
       this.port.postMessage({ type: "audio", buffer: int16.buffer, isSpeech }, [int16.buffer]);

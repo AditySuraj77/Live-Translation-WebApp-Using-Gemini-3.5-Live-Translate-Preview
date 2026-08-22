@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Audio utilities for the translation pipeline.
  */
 
@@ -42,7 +42,8 @@ export function createTranslatedMediaStream(ctx: AudioContext): {
   enqueue: (buf: AudioBuffer) => void;
 } {
   const dest = ctx.createMediaStreamDestination();
-  let nextPlayTime = ctx.currentTime;
+  let nextPlayTime = 0;
+  const JITTER_BUFFER_SEC = 0.06; // 60ms initial buffer to prevent network packet gap stutter
 
   function enqueue(buf: AudioBuffer) {
     if (ctx.state === "suspended") {
@@ -51,9 +52,15 @@ export function createTranslatedMediaStream(ctx: AudioContext): {
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(dest);
-    const startAt = Math.max(ctx.currentTime, nextPlayTime);
-    src.start(startAt);
-    nextPlayTime = startAt + buf.duration;
+
+    const now = ctx.currentTime;
+    // If the queue was empty or fell behind, start with a tiny lead time (jitter buffer)
+    if (nextPlayTime <= now) {
+      nextPlayTime = now + JITTER_BUFFER_SEC;
+    }
+
+    src.start(nextPlayTime);
+    nextPlayTime += buf.duration;
   }
 
   return { node: dest, stream: dest.stream, enqueue };

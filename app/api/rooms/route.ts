@@ -7,11 +7,32 @@ export async function GET() {
   const rooms = [];
   const now = Date.now();
 
-  for (const [id, entry] of roomStore.entries()) {
+  for (const [id, entry] of Array.from(roomStore.entries())) {
     const occupants = entry.subscribers.size;
 
-    // Filter out abandoned empty rooms older than 5 minutes
-    if (occupants === 0 && entry.metadata && now - entry.metadata.createdAt > 300_000) {
+    // Instantly purge empty rooms with 0 occupants that are older than 15s (grace period for initial navigation)
+    if (occupants === 0) {
+      if (entry.metadata && now - entry.metadata.createdAt < 15_000) {
+        // Newly created room whose host is currently navigating into the room
+        rooms.push({
+          id,
+          name: entry.metadata.name || `Room ${id}`,
+          hostLang: entry.metadata.hostLang || "hi",
+          targetLang: entry.metadata.targetLang || "en",
+          hostProfile: entry.metadata.hostProfile || {
+            name: "Host User",
+            avatar: "🎙️",
+            color: "indigo",
+          },
+          occupants: 1, // Treat as waiting host
+          maxOccupants: 2,
+          status: "open" as const,
+          createdAt: entry.metadata.createdAt,
+        });
+      } else {
+        // Abandoned room with 0 subscribers — clean up from memory
+        roomStore.delete(id);
+      }
       continue;
     }
 
@@ -27,7 +48,7 @@ export async function GET() {
       },
       occupants,
       maxOccupants: 2,
-      status: occupants >= 2 ? "full" : "open",
+      status: occupants >= 2 ? ("full" as const) : ("open" as const),
       createdAt: entry.metadata?.createdAt || now,
     });
   }

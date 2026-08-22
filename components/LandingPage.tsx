@@ -167,6 +167,8 @@ export default function LandingPage() {
   }
 
   const filteredRooms = rooms.filter((r) => {
+    // Only display active rooms that have real occupants
+    if (r.occupants === 0) return false;
     const host = findLanguage(r.hostLang).label.toLowerCase();
     const target = findLanguage(r.targetLang).label.toLowerCase();
     const hostName = (r.hostProfile?.name || "").toLowerCase();

@@ -12,22 +12,26 @@ export async function GET() {
   const iceServers: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    { urls: `stun:${host}` },
   ];
 
   if (username && credential) {
-    iceServers.push({
-      urls: [
-        `turn:${host}`,
-        `turn:${hostWithoutPort}:3478?transport=udp`,
-        `turn:${hostWithoutPort}:3478?transport=tcp`,
-        `turn:${hostWithoutPort}:80?transport=tcp`,
-        `turn:${hostWithoutPort}:443?transport=tcp`,
-        `turns:${hostWithoutPort}:443?transport=tcp`,
-      ],
-      username,
-      credential,
-    });
+    iceServers.push(
+      {
+        urls: [
+          `turn:${hostWithoutPort}:3478?transport=udp`,
+          `turn:${host}`,
+        ],
+        username,
+        credential,
+      },
+      {
+        urls: [
+          `turn:${hostWithoutPort}:443?transport=tcp`,
+        ],
+        username,
+        credential,
+      }
+    );
   }
 
   return NextResponse.json({ iceServers });

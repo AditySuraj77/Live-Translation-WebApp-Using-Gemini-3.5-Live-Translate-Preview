@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { getOrCreateRoom, encodeSSE } from "@/lib/room-store";
+import { getOrCreateRoom, encodeSSE, roomStore } from "@/lib/room-store";
 
 export const dynamic = "force-dynamic";
 
@@ -73,15 +73,15 @@ export async function GET(req: NextRequest) {
         clearInterval(keepalive);
         room.subscribers.delete(controller);
 
-        // If no users are left in the room, schedule cleanup after 30 seconds
+        // If no users are left in the room, schedule cleanup after 5 seconds
         if (room.subscribers.size === 0) {
+          if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
           room.cleanupTimer = setTimeout(() => {
             if (room.subscribers.size === 0) {
               console.log(`[Signal SSE] Cleaning up empty room: ${uppercaseId}`);
-              const { roomStore } = require("@/lib/room-store");
               roomStore.delete(uppercaseId);
             }
-          }, 30_000);
+          }, 5_000);
         }
 
         try {

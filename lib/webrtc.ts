@@ -98,9 +98,7 @@ export class PeerManager {
 
     // Broadcast our profile to any active or joining peer
     if (this.myProfile) {
-      setTimeout(() => {
-        this._postSignal("profile", this.myProfile);
-      }, 500);
+      this._postSignal("profile", this.myProfile);
     }
 
     if (this.role === "caller") {
