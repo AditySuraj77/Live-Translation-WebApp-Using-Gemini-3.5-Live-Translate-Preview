@@ -1,20 +1,57 @@
-﻿import { NextRequest } from "next/server";
+import { NextRequest } from "next/server";
 import { getOrCreateRoom, encodeSSE } from "@/lib/room-store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   const roomId = req.nextUrl.searchParams.get("roomId");
+  const myLang = req.nextUrl.searchParams.get("myLang");
+  const targetLang = req.nextUrl.searchParams.get("targetLang");
+
   if (!roomId) {
     return new Response("Missing roomId", { status: 400 });
   }
 
-  const room = getOrCreateRoom(roomId);
+  const uppercaseId = roomId.toUpperCase();
+  const room = getOrCreateRoom(uppercaseId, {
+    id: uppercaseId,
+    hostLang: myLang || undefined,
+    targetLang: targetLang || undefined,
+  });
+
+  // Cancel any pending cleanup timer when someone connects
+  if (room.cleanupTimer) {
+    clearTimeout(room.cleanupTimer);
+    room.cleanupTimer = undefined;
+  }
+
+  // Max 2 users per room rule
+  if (room.subscribers.size >= 2) {
+    console.warn(`[Signal SSE] Room ${uppercaseId} is full! Rejecting new subscriber.`);
+    const fullStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encodeSSE({
+            type: "room_full",
+            payload: { message: "Room is full. Only 2 participants are allowed per room." },
+            from: "system",
+          })
+        );
+        controller.close();
+      },
+    });
+    return new Response(fullStream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+      },
+    });
+  }
 
   const stream = new ReadableStream({
     start(controller) {
-      console.log(`[Signal SSE] New subscriber connected for room: ${roomId}. Current queued events: ${room.queue.length}`);
-      
+      console.log(`[Signal SSE] New subscriber connected for room: ${uppercaseId}. Current subscribers: ${room.subscribers.size + 1}`);
+
       // Flush currently queued events for this room so late-joiners get the offer/ICE
       for (const event of room.queue) {
         controller.enqueue(encodeSSE(event));
@@ -32,9 +69,21 @@ export async function GET(req: NextRequest) {
       }, 15_000);
 
       req.signal.addEventListener("abort", () => {
-        console.log(`[Signal SSE] Subscriber disconnected from room: ${roomId}`);
+        console.log(`[Signal SSE] Subscriber disconnected from room: ${uppercaseId}`);
         clearInterval(keepalive);
         room.subscribers.delete(controller);
+
+        // If no users are left in the room, schedule cleanup after 30 seconds
+        if (room.subscribers.size === 0) {
+          room.cleanupTimer = setTimeout(() => {
+            if (room.subscribers.size === 0) {
+              console.log(`[Signal SSE] Cleaning up empty room: ${uppercaseId}`);
+              const { roomStore } = require("@/lib/room-store");
+              roomStore.delete(uppercaseId);
+            }
+          }, 30_000);
+        }
+
         try {
           controller.close();
         } catch {

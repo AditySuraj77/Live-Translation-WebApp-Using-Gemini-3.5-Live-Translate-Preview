@@ -2,12 +2,14 @@
  * PeerManager — WebRTC peer connection with SSE-based signaling.
  */
 
+import type { UserProfileInfo } from "./room-store";
+
 type Role = "caller" | "callee";
 
 interface SignalEvent {
-  type: "offer" | "answer" | "ice";
+  type: "offer" | "answer" | "ice" | "profile" | "room_full";
   payload: unknown;
-  from: Role;
+  from: Role | "system";
 }
 
 const STUN_SERVERS: RTCIceServer[] = [
@@ -20,15 +22,29 @@ export class PeerManager {
   private pc: RTCPeerConnection;
   private roomId: string;
   private role: Role;
+  private myLang?: string;
+  private targetLang?: string;
+  private myProfile?: UserProfileInfo;
   private sse: EventSource | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private _onRemoteStream?: (stream: MediaStream) => void;
   private _onStatusChange?: (status: string) => void;
+  private _onPeerProfile?: (profile: UserProfileInfo) => void;
 
-  constructor(roomId: string, role: Role) {
+  constructor(
+    roomId: string,
+    role: Role,
+    myLang?: string,
+    targetLang?: string,
+    myProfile?: UserProfileInfo,
+    iceServers?: RTCIceServer[]
+  ) {
     this.roomId = roomId;
     this.role = role;
-    this.pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+    this.myLang = myLang;
+    this.targetLang = targetLang;
+    this.myProfile = myProfile;
+    this.pc = new RTCPeerConnection({ iceServers: iceServers && iceServers.length > 0 ? iceServers : STUN_SERVERS });
 
     this.pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
@@ -72,9 +88,20 @@ export class PeerManager {
     this._onStatusChange = cb;
   }
 
+  onPeerProfile(cb: (profile: UserProfileInfo) => void): void {
+    this._onPeerProfile = cb;
+  }
+
   /** Start signaling — opens SSE and begins offer/answer exchange */
   async start(): Promise<void> {
     this._openSSE();
+
+    // Broadcast our profile to any active or joining peer
+    if (this.myProfile) {
+      setTimeout(() => {
+        this._postSignal("profile", this.myProfile);
+      }, 500);
+    }
 
     if (this.role === "caller") {
       await this._createAndPostOffer();
@@ -82,14 +109,23 @@ export class PeerManager {
   }
 
   private _openSSE(): void {
-    const url = `/api/signal/stream?roomId=${encodeURIComponent(this.roomId)}`;
+    let url = `/api/signal/stream?roomId=${encodeURIComponent(this.roomId)}`;
+    if (this.myLang) url += `&myLang=${encodeURIComponent(this.myLang)}`;
+    if (this.targetLang) url += `&targetLang=${encodeURIComponent(this.targetLang)}`;
+    url += `&role=${encodeURIComponent(this.role)}`;
+
     console.log(`[WebRTC (${this.role})] Connecting SSE to ${url}`);
     this.sse = new EventSource(url);
 
     this.sse.onmessage = async (event) => {
       try {
-        const signal: SignalEvent = JSON.parse(event.data);
-        await this._handleSignal(signal);
+        const signal = JSON.parse(event.data);
+        if (signal.type === "room_full") {
+          console.warn("[WebRTC] Room is full event received");
+          this._onStatusChange?.("room_full");
+          return;
+        }
+        await this._handleSignal(signal as SignalEvent);
       } catch (e) {
         console.error("[WebRTC] Error parsing SSE event:", e);
       }
@@ -106,11 +142,14 @@ export class PeerManager {
 
     console.log(`[WebRTC (${this.role})] Received: ${signal.type} from ${signal.from}`);
 
+    if (signal.type === "profile" && signal.payload) {
+      console.log(`[WebRTC (${this.role})] Received peer profile:`, signal.payload);
+      this._onPeerProfile?.(signal.payload as UserProfileInfo);
+      return;
+    }
+
     if (signal.type === "offer" && this.role === "callee") {
       try {
-        if (this.pc.signalingState !== "stable" && this.pc.signalingState !== "have-local-offer") {
-          // If already in have-remote-offer, re-creating answer
-        }
         await this.pc.setRemoteDescription(
           new RTCSessionDescription(signal.payload as RTCSessionDescriptionInit)
         );
@@ -126,6 +165,11 @@ export class PeerManager {
         await this.pc.setLocalDescription(answer);
         console.log(`[WebRTC (callee)] Local answer set. Posting answer...`);
         await this._postSignal("answer", answer);
+
+        // Also reply with our profile if available
+        if (this.myProfile) {
+          await this._postSignal("profile", this.myProfile);
+        }
       } catch (err) {
         console.error("[WebRTC (callee)] Failed to handle offer:", err);
       }
@@ -144,6 +188,11 @@ export class PeerManager {
             await this.pc.addIceCandidate(new RTCIceCandidate(c));
           }
           this.pendingCandidates = [];
+
+          // Also reply with our profile to ensure callee gets it
+          if (this.myProfile) {
+            await this._postSignal("profile", this.myProfile);
+          }
         }
       } catch (err) {
         console.error("[WebRTC (caller)] Failed to set remote answer:", err);

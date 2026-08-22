@@ -65,16 +65,13 @@ class AudioProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // 2. Accurate resampling from input sampleRate to 16000Hz with quantum boundary handling
-    while (this._sourceIndex < len - 1) {
+    // 2. Continuous linear interpolation resampling across quantum boundaries
+    while (this._sourceIndex < len) {
       const idx = Math.floor(this._sourceIndex);
       const frac = this._sourceIndex - idx;
-      let sample;
-      if (idx === -1) {
-        sample = this._lastSample * (1 - frac) + filtered[0] * frac;
-      } else {
-        sample = filtered[idx] * (1 - frac) + filtered[idx + 1] * frac;
-      }
+      const s0 = idx < 0 ? this._lastSample : filtered[idx];
+      const s1 = idx + 1 < len ? filtered[idx + 1] : filtered[len - 1];
+      const sample = s0 * (1 - frac) + s1 * frac;
       this._buffer.push(sample);
       this._sourceIndex += this._resampleRatio;
     }
@@ -84,12 +81,22 @@ class AudioProcessor extends AudioWorkletProcessor {
     // 3. Dispatch chunks of 1600 Int16 samples (100ms @ 16kHz)
     while (this._buffer.length >= this._chunkSize) {
       const chunk = this._buffer.splice(0, this._chunkSize);
+      
+      // Calculate RMS energy for noise gate
+      let sumSq = 0;
+      for (let i = 0; i < chunk.length; i++) {
+        sumSq += chunk[i] * chunk[i];
+      }
+      const rms = Math.sqrt(sumSq / chunk.length);
+
+      // Gate out faint ambient noise / room speaker bleed (< 0.008 RMS)
+      const isSpeech = rms >= 0.008;
       const int16 = new Int16Array(chunk.length);
       for (let i = 0; i < chunk.length; i++) {
-        const s = Math.max(-1, Math.min(1, chunk[i]));
+        const s = isSpeech ? Math.max(-1, Math.min(1, chunk[i])) : 0;
         int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
-      this.port.postMessage({ type: "audio", buffer: int16.buffer }, [int16.buffer]);
+      this.port.postMessage({ type: "audio", buffer: int16.buffer, isSpeech }, [int16.buffer]);
     }
 
     return true;

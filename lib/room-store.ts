@@ -1,13 +1,30 @@
-﻿export interface SignalEvent {
-  type: "offer" | "answer" | "ice";
+export interface UserProfileInfo {
+  name: string;
+  avatar: string;
+  color?: string;
+}
+
+export interface SignalEvent {
+  type: "offer" | "answer" | "ice" | "room_full" | "profile";
   payload: unknown;
-  from: "caller" | "callee";
+  from: "caller" | "callee" | "system";
+}
+
+export interface RoomMetadata {
+  id: string;
+  name?: string;
+  hostLang: string;
+  targetLang: string;
+  hostProfile?: UserProfileInfo;
+  createdAt: number;
 }
 
 export interface RoomEntry {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   subscribers: Set<ReadableStreamDefaultController<any>>;
   queue: SignalEvent[];
+  metadata?: RoomMetadata;
+  cleanupTimer?: NodeJS.Timeout;
 }
 
 declare global {
@@ -21,11 +38,22 @@ if (!globalThis.__liveRooms) {
 
 export const roomStore = globalThis.__liveRooms;
 
-export function getOrCreateRoom(roomId: string): RoomEntry {
+export function getOrCreateRoom(roomId: string, metadata?: Partial<RoomMetadata>): RoomEntry {
   if (!roomStore.has(roomId)) {
     roomStore.set(roomId, { subscribers: new Set(), queue: [] });
   }
-  return roomStore.get(roomId)!;
+  const entry = roomStore.get(roomId)!;
+  if (metadata) {
+    entry.metadata = {
+      id: roomId,
+      name: metadata.name || entry.metadata?.name || `Room ${roomId}`,
+      hostLang: metadata.hostLang || entry.metadata?.hostLang || "hi",
+      targetLang: metadata.targetLang || entry.metadata?.targetLang || "en",
+      hostProfile: metadata.hostProfile || entry.metadata?.hostProfile,
+      createdAt: entry.metadata?.createdAt || Date.now(),
+    };
+  }
+  return entry;
 }
 
 export function encodeSSE(event: SignalEvent | object): string {

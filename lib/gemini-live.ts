@@ -32,7 +32,7 @@ function buildFallbackConfig(
     systemInstruction: {
       parts: [
         {
-          text: `You are a real-time speech interpreter. The user speaks in ${sourceLangLabel}. Translate everything immediately into ${targetLangLabel} and speak only the translated words clearly. Do not output anything else.`,
+          text: `You are a real-time speech interpreter. The user speaks in ${sourceLangLabel}. Translate everything immediately into ${targetLangLabel} and speak only the translated words clearly. Do not output anything else. Never repeat previously translated words or phrases. Translate each utterance only once.`,
         },
       ],
     },

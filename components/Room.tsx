@@ -5,8 +5,10 @@ import { findLanguage } from "@/lib/languages";
 import { GeminiLiveSession } from "@/lib/gemini-live";
 import { PeerManager } from "@/lib/webrtc";
 import { pcmToAudioBuffer, createTranslatedMediaStream } from "@/lib/audio-utils";
+import { getStoredUserProfile, type UserProfile } from "@/lib/user-profile";
+import type { UserProfileInfo } from "@/lib/room-store";
 
-type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
+type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error" | "room_full";
 
 interface RoomProps {
   roomId: string;
@@ -18,6 +20,13 @@ interface RoomProps {
 export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomProps) {
   const myLang = findLanguage(myLangCode);
   const targetLang = findLanguage(targetLangCode);
+
+  const [myProfile, setMyProfile] = useState<UserProfile>({
+    name: "You",
+    avatar: "🎙️",
+    color: "indigo",
+  });
+  const [peerProfile, setPeerProfile] = useState<UserProfileInfo | null>(null);
 
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [webrtcState, setWebrtcState] = useState<string>("initializing");
@@ -38,6 +47,12 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const micStreamRef = useRef<MediaStream | null>(null);
   const receivingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Load user profile on mount
+  useEffect(() => {
+    const p = getStoredUserProfile();
+    setMyProfile(p);
+  }, []);
+
   const cleanup = useCallback(() => {
     geminiRef.current?.disconnect();
     peerRef.current?.close();
@@ -53,6 +68,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     async function start() {
       try {
         setStatus("connecting");
+        const currentProfile = getStoredUserProfile();
 
         // 1. Fetch ephemeral auth token from server
         const tokenRes = await fetch("/api/gemini-token");
@@ -61,12 +77,12 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
 
         if (cancelled) return;
 
-        // 2. Mic permission
+        // 2. Mic permission with echo cancellation and AGC disabled
         const micStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
-            autoGainControl: true,
+            autoGainControl: false,
           },
           video: false,
         });
@@ -134,16 +150,42 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         let speakTimer: NodeJS.Timeout | null = null;
         workletNode.port.onmessage = (evt) => {
           if (evt.data?.type === "audio" && !muted) {
-            setIsSpeaking(true);
-            if (speakTimer) clearTimeout(speakTimer);
-            speakTimer = setTimeout(() => setIsSpeaking(false), 300);
+            if (evt.data.isSpeech) {
+              setIsSpeaking(true);
+              if (speakTimer) clearTimeout(speakTimer);
+              speakTimer = setTimeout(() => setIsSpeaking(false), 300);
+            }
 
             gemini.sendAudioChunk(evt.data.buffer);
           }
         };
 
-        // 7. WebRTC Setup
-        const peer = new PeerManager(roomId, role);
+        // 7. WebRTC Setup: Load dynamic TURN & STUN ICE servers
+        let iceServers: RTCIceServer[] | undefined;
+        try {
+          const turnRes = await fetch("/api/turn-credentials");
+          if (turnRes.ok) {
+            const turnData = await turnRes.json();
+            if (turnData.iceServers && Array.isArray(turnData.iceServers)) {
+              iceServers = turnData.iceServers;
+            }
+          }
+        } catch (turnErr) {
+          console.warn("[Room] Could not load TURN credentials, fallback to default STUN:", turnErr);
+        }
+
+        const peer = new PeerManager(
+          roomId,
+          role,
+          myLangCode,
+          targetLangCode,
+          {
+            name: currentProfile.name,
+            avatar: currentProfile.avatar,
+            color: currentProfile.color,
+          },
+          iceServers
+        );
         peerRef.current = peer;
 
         // Add the translated stream as our outgoing track to the other peer
@@ -160,9 +202,17 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           }
         });
 
+        peer.onPeerProfile((prof) => {
+          console.log("[Room] Peer profile updated:", prof);
+          setPeerProfile(prof);
+        });
+
         peer.onStatusChange((s) => {
           setWebrtcState(s);
-          if (s === "connected" || s === "completed") {
+          if (s === "room_full") {
+            setStatus("room_full");
+            setError("This room is already full (maximum 2 participants allowed).");
+          } else if (s === "connected" || s === "completed") {
             setStatus("connected");
           } else if (s === "disconnected" || s === "failed" || s === "closed") {
             setStatus("disconnected");
@@ -223,6 +273,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     connected: "text-emerald-400",
     disconnected: "text-red-400",
     error: "text-red-500",
+    room_full: "text-amber-500",
   };
 
   const statusLabel: Record<ConnectionStatus, string> = {
@@ -231,112 +282,177 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     connected: "Connected (Live)",
     disconnected: "Disconnected",
     error: "Error",
+    room_full: "Room Full",
   };
 
   return (
     <main
       onClick={handleUserGesture}
-      className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-6 gap-6 select-none cursor-pointer"
+      className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-4 sm:p-6 gap-6 select-none cursor-pointer"
     >
       {/* Header */}
-      <div className="text-center">
-        <h1 className="text-3xl font-bold tracking-tight">🎙️ LiveTranslate</h1>
-        <p className="text-gray-400 text-sm mt-1">
-          Room: <span className="font-mono text-indigo-400 font-bold tracking-widest">{roomId}</span>
-        </p>
-      </div>
-
-      {/* Main card */}
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-md flex flex-col gap-4 shadow-xl">
-        <div className="flex justify-between items-center pb-2 border-b border-gray-800">
-          <span className="text-sm text-gray-400">Connection</span>
-          <span className={`text-sm font-semibold flex items-center gap-2 ${statusColor[status]}`}>
-            <span className={`w-2.5 h-2.5 rounded-full ${status === "connected" ? "bg-emerald-400 animate-pulse" : "bg-yellow-400"}`} />
-            {statusLabel[status]}
-          </span>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <div className="bg-gray-800/60 p-3 rounded-xl border border-gray-800">
-            <p className="text-xs text-gray-400">You Speak</p>
-            <p className="font-semibold text-white mt-0.5">{myLang.label}</p>
-          </div>
-          <div className="bg-gray-800/60 p-3 rounded-xl border border-gray-800">
-            <p className="text-xs text-gray-400">Other Peer Hears</p>
-            <p className="font-semibold text-emerald-400 mt-0.5">{targetLang.label}</p>
-          </div>
-        </div>
-
-        {/* Live Audio Activity Indicators */}
-        <div className="flex flex-col gap-2 pt-2">
-          <div className="flex justify-between items-center text-xs">
-            <span className="text-gray-400">Microphone Input:</span>
-            <span className={muted ? "text-red-400 font-medium" : isSpeaking ? "text-emerald-400 font-bold animate-pulse" : "text-gray-500"}>
-              {muted ? "Muted" : isSpeaking ? "🎤 Transmitting audio..." : "Listening..."}
-            </span>
-          </div>
-
-          <div className="flex justify-between items-center text-xs">
-            <span className="text-gray-400">Gemini Live Translator:</span>
-            <span className={geminiConnected ? (isReceivingAudio ? "text-indigo-400 font-bold animate-pulse" : "text-emerald-400 font-medium") : "text-yellow-400"}>
-              {!geminiConnected ? "Connecting to AI..." : isReceivingAudio ? "🔊 Translating & Streaming..." : "Ready"}
-            </span>
-          </div>
-
-          <div className="flex justify-between items-center text-xs">
-            <span className="text-gray-400">WebRTC Peer:</span>
-            <span className="font-mono text-gray-400">{webrtcState}</span>
-          </div>
-        </div>
-
-        {lastTranscript && (
-          <div className="mt-2 bg-black/40 border border-gray-800 p-3 rounded-xl text-xs text-gray-300">
-            <span className="text-gray-500 block mb-1">Live Translation Text:</span>
-            {lastTranscript}
-          </div>
-        )}
-      </div>
-
-      {/* Share room ID box for caller */}
-      {role === "caller" && status !== "connected" && (
-        <div className="bg-indigo-950/40 border border-indigo-800/60 rounded-2xl p-4 w-full max-w-md text-center">
-          <p className="text-xs text-indigo-300 mb-1">Share this Room ID with the other person to join:</p>
-          <p className="text-3xl font-mono font-bold tracking-widest text-indigo-400 select-all">{roomId}</p>
-        </div>
-      )}
-
-      {error && (
-        <div className="bg-red-900/30 border border-red-700 rounded-xl p-4 w-full max-w-md text-sm text-red-300">
-          ⚠️ {error}
-        </div>
-      )}
-
-      {/* Controls */}
-      <div className="flex gap-4">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleMute();
-          }}
-          className={`px-6 py-3 rounded-xl font-semibold transition shadow-md ${
-            muted
-              ? "bg-gray-700 hover:bg-gray-600 text-white"
-              : "bg-indigo-600 hover:bg-indigo-500 text-white"
-          }`}
-        >
-          {muted ? "🔇 Unmute Mic" : "🎤 Mute Mic"}
-        </button>
-
-        <button
+      <div className="flex flex-col items-center text-center">
+        <a
+          href="/"
           onClick={(e) => {
             e.stopPropagation();
             handleLeave();
           }}
-          className="px-6 py-3 rounded-xl font-semibold bg-red-700 hover:bg-red-600 transition text-white shadow-md"
+          className="text-xs text-gray-400 hover:text-white mb-2 flex items-center gap-1.5 transition px-3 py-1 bg-gray-900 border border-gray-800 rounded-full"
         >
-          Leave Room
-        </button>
+          <span>←</span> Back to Active Rooms Lobby
+        </a>
+        <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">🎙️ LiveTranslate</h1>
+        <p className="text-gray-400 text-xs sm:text-sm mt-1">
+          Room: <span className="font-mono text-indigo-400 font-bold tracking-widest">{roomId}</span>
+        </p>
       </div>
+
+      {status === "room_full" ? (
+        <div className="bg-gray-900 border border-amber-800/60 rounded-2xl p-6 w-full max-w-md flex flex-col gap-4 text-center items-center shadow-xl">
+          <div className="w-14 h-14 rounded-full bg-amber-950/80 border border-amber-700/50 flex items-center justify-center text-2xl">
+            🔒
+          </div>
+          <h2 className="text-xl font-bold text-amber-300">Room is Full (2/2)</h2>
+          <p className="text-sm text-gray-400 leading-relaxed">
+            This room already has 2 participants chatting. For the best real-time translation experience, each room is strictly limited to 2 people.
+          </p>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              window.location.href = "/";
+            }}
+            className="w-full mt-2 bg-indigo-600 hover:bg-indigo-500 transition py-2.5 rounded-xl font-semibold text-white shadow-lg cursor-pointer"
+          >
+            ← Choose Another Room in Lobby
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* Main card */}
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-lg flex flex-col gap-5 shadow-2xl">
+            {/* Connection Status Bar */}
+            <div className="flex justify-between items-center pb-3 border-b border-gray-800">
+              <span className="text-xs text-gray-400 font-medium">Session Status</span>
+              <span className={`text-xs font-semibold flex items-center gap-2 ${statusColor[status]}`}>
+                <span className={`w-2.5 h-2.5 rounded-full ${status === "connected" ? "bg-emerald-400 animate-pulse" : "bg-yellow-400"}`} />
+                {statusLabel[status]}
+              </span>
+            </div>
+
+            {/* Two Participants Profile Cards (Left = You, Right = Partner) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* You */}
+              <div className="bg-gray-800/60 p-4 rounded-xl border border-gray-700/60 flex flex-col justify-between gap-3 shadow-inner">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-xl bg-indigo-950 border border-indigo-700/60 flex items-center justify-center text-2xl shrink-0 shadow">
+                    {myProfile.avatar}
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-indigo-400 tracking-wider block">You</span>
+                    <p className="font-semibold text-white text-sm truncate max-w-[130px]">{myProfile.name}</p>
+                  </div>
+                </div>
+
+                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-gray-800 text-xs">
+                  <span className="text-gray-400 text-[11px] block">You Speak:</span>
+                  <span className="font-semibold text-indigo-300">{myLang.label}</span>
+                </div>
+              </div>
+
+              {/* Partner */}
+              <div className="bg-gray-800/60 p-4 rounded-xl border border-gray-700/60 flex flex-col justify-between gap-3 shadow-inner">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-xl bg-emerald-950 border border-emerald-700/60 flex items-center justify-center text-2xl shrink-0 shadow">
+                    {peerProfile ? peerProfile.avatar : "👤"}
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider block">Partner</span>
+                    <p className="font-semibold text-white text-sm truncate max-w-[130px]">
+                      {peerProfile ? peerProfile.name : "Waiting for partner..."}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-gray-800 text-xs">
+                  <span className="text-gray-400 text-[11px] block">Partner Hears / Speaks:</span>
+                  <span className="font-semibold text-emerald-300">{targetLang.label}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Live Audio Activity Indicators */}
+            <div className="flex flex-col gap-2 pt-1 border-t border-gray-800/80">
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-gray-400">Your Mic Input:</span>
+                <span className={muted ? "text-red-400 font-medium" : isSpeaking ? "text-emerald-400 font-bold animate-pulse" : "text-gray-500"}>
+                  {muted ? "Muted" : isSpeaking ? "🎤 Transmitting audio..." : "Listening..."}
+                </span>
+              </div>
+
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-gray-400">Gemini Live Translator:</span>
+                <span className={geminiConnected ? (isReceivingAudio ? "text-indigo-400 font-bold animate-pulse" : "text-emerald-400 font-medium") : "text-yellow-400"}>
+                  {!geminiConnected ? "Connecting to AI..." : isReceivingAudio ? "🔊 Translating & Streaming..." : "Ready"}
+                </span>
+              </div>
+
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-gray-400">WebRTC Peer:</span>
+                <span className="font-mono text-gray-400">{webrtcState}</span>
+              </div>
+            </div>
+
+            {lastTranscript && (
+              <div className="bg-black/50 border border-gray-800 p-3 rounded-xl text-xs text-gray-300">
+                <span className="text-gray-500 block mb-1">Live Translation Text:</span>
+                {lastTranscript}
+              </div>
+            )}
+          </div>
+
+          {/* Share room ID box for caller */}
+          {role === "caller" && status !== "connected" && (
+            <div className="bg-indigo-950/40 border border-indigo-800/60 rounded-2xl p-4 w-full max-w-lg text-center">
+              <p className="text-xs text-indigo-300 mb-1">Room is listed in the Lobby. You can also share the ID directly:</p>
+              <p className="text-2xl font-mono font-bold tracking-widest text-indigo-400 select-all">{roomId}</p>
+            </div>
+          )}
+
+          {error && (
+            <div className="bg-red-900/30 border border-red-700 rounded-xl p-4 w-full max-w-lg text-sm text-red-300">
+              ⚠️ {error}
+            </div>
+          )}
+
+          {/* Controls */}
+          <div className="flex gap-4">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleMute();
+              }}
+              className={`px-6 py-3 rounded-xl font-semibold transition shadow-md cursor-pointer ${
+                muted
+                  ? "bg-gray-700 hover:bg-gray-600 text-white"
+                  : "bg-indigo-600 hover:bg-indigo-500 text-white"
+              }`}
+            >
+              {muted ? "🔇 Unmute Mic" : "🎤 Mute Mic"}
+            </button>
+
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleLeave();
+              }}
+              className="px-6 py-3 rounded-xl font-semibold bg-red-700 hover:bg-red-600 transition text-white shadow-md cursor-pointer"
+            >
+              Leave Room
+            </button>
+          </div>
+        </>
+      )}
 
       {/* Audio element for receiving translated speech from remote peer */}
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
