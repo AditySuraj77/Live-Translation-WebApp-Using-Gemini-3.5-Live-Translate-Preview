@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { getOrCreateRoom, encodeSSE, roomStore } from "@/lib/room-store";
+import { getOrCreateRoom, encodeSSE, roomStore, SignalEvent } from "@/lib/room-store";
+import { getRedis } from "@/lib/redis";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +8,7 @@ export async function GET(req: NextRequest) {
   const roomId = req.nextUrl.searchParams.get("roomId");
   const myLang = req.nextUrl.searchParams.get("myLang");
   const targetLang = req.nextUrl.searchParams.get("targetLang");
+  const role = (req.nextUrl.searchParams.get("role") || "caller") as "caller" | "callee";
 
   if (!roomId) {
     return new Response("Missing roomId", { status: 400 });
@@ -19,47 +21,90 @@ export async function GET(req: NextRequest) {
     targetLang: targetLang || undefined,
   });
 
-  // Cancel any pending cleanup timer when someone connects
   if (room.cleanupTimer) {
     clearTimeout(room.cleanupTimer);
     room.cleanupTimer = undefined;
   }
 
-  // Max 2 users per room rule
-  if (room.subscribers.size >= 2) {
-    console.warn(`[Signal SSE] Room ${uppercaseId} is full! Rejecting new subscriber.`);
-    const fullStream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(
-          encodeSSE({
-            type: "room_full",
-            payload: { message: "Room is full. Only 2 participants are allowed per room." },
-            from: "system",
-          })
-        );
-        controller.close();
-      },
-    });
-    return new Response(fullStream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
-      },
-    });
-  }
+  const redis = getRedis();
 
   const stream = new ReadableStream({
-    start(controller) {
-      console.log(`[Signal SSE] New subscriber connected for room: ${uppercaseId}. Current subscribers: ${room.subscribers.size + 1}`);
+    async start(controller) {
+      console.log(`[Signal SSE] ${role} connected for room: ${uppercaseId}.`);
 
-      // Flush currently queued events for this room so late-joiners get the offer/ICE
+      // 1. Flush in-memory queue
       for (const event of room.queue) {
         controller.enqueue(encodeSSE(event));
       }
-
       room.subscribers.add(controller);
 
-      // Keepalive ping every 15s
+      // Track already delivered signals
+      let hasDeliveredOffer = false;
+      let hasDeliveredAnswer = false;
+      let deliveredIceCount = 0;
+      let hasDeliveredProfile = false;
+
+      const peerRole = role === "caller" ? "callee" : "caller";
+
+      // 2. Redis polling loop (400ms) for real-time cross-container delivery
+      let redisPollTimer: NodeJS.Timeout | null = null;
+
+      if (redis) {
+        async function pollRedis() {
+          try {
+            if (!redis) return;
+
+            // Deliver Offer to Callee
+            if (role === "callee" && !hasDeliveredOffer) {
+              const offerRaw = await redis.get<string | object>(`room:${uppercaseId}:offer`);
+              if (offerRaw) {
+                const payload = typeof offerRaw === "string" ? JSON.parse(offerRaw) : offerRaw;
+                controller.enqueue(encodeSSE({ type: "offer", payload, from: "caller" }));
+                hasDeliveredOffer = true;
+              }
+            }
+
+            // Deliver Answer to Caller
+            if (role === "caller" && !hasDeliveredAnswer) {
+              const answerRaw = await redis.get<string | object>(`room:${uppercaseId}:answer`);
+              if (answerRaw) {
+                const payload = typeof answerRaw === "string" ? JSON.parse(answerRaw) : answerRaw;
+                controller.enqueue(encodeSSE({ type: "answer", payload, from: "callee" }));
+                hasDeliveredAnswer = true;
+              }
+            }
+
+            // Deliver Profile
+            if (!hasDeliveredProfile) {
+              const profileRaw = await redis.get<string | object>(`room:${uppercaseId}:profile:${peerRole}`);
+              if (profileRaw) {
+                const payload = typeof profileRaw === "string" ? JSON.parse(profileRaw) : profileRaw;
+                controller.enqueue(encodeSSE({ type: "profile", payload, from: peerRole }));
+                hasDeliveredProfile = true;
+              }
+            }
+
+            // Deliver new ICE candidates from peer
+            const iceKey = `room:${uppercaseId}:ice:${peerRole}`;
+            const iceCandidates = await redis.lrange(iceKey, deliveredIceCount, -1);
+            if (iceCandidates && iceCandidates.length > 0) {
+              for (const candRaw of iceCandidates) {
+                const payload = typeof candRaw === "string" ? JSON.parse(candRaw) : candRaw;
+                controller.enqueue(encodeSSE({ type: "ice", payload, from: peerRole }));
+                deliveredIceCount++;
+              }
+            }
+          } catch (pErr) {
+            console.warn("[Signal SSE] Redis poll error:", pErr);
+          }
+        }
+
+        // Initial fetch immediately
+        await pollRedis();
+        redisPollTimer = setInterval(pollRedis, 400);
+      }
+
+      // 3. Keepalive ping every 15s
       const keepalive = setInterval(() => {
         try {
           controller.enqueue(": keepalive\n\n");
@@ -69,17 +114,34 @@ export async function GET(req: NextRequest) {
       }, 15_000);
 
       req.signal.addEventListener("abort", () => {
-        console.log(`[Signal SSE] Subscriber disconnected from room: ${uppercaseId}`);
+        console.log(`[Signal SSE] Subscriber (${role}) disconnected from room: ${uppercaseId}`);
         clearInterval(keepalive);
+        if (redisPollTimer) clearInterval(redisPollTimer);
         room.subscribers.delete(controller);
 
-        // If no users are left in the room, schedule cleanup after 5 seconds
         if (room.subscribers.size === 0) {
           if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
-          room.cleanupTimer = setTimeout(() => {
+          room.cleanupTimer = setTimeout(async () => {
             if (room.subscribers.size === 0) {
               console.log(`[Signal SSE] Cleaning up empty room: ${uppercaseId}`);
               roomStore.delete(uppercaseId);
+              if (redis) {
+                try {
+                  await redis.del(
+                    `room:${uppercaseId}:meta`,
+                    `room:${uppercaseId}:occupants`,
+                    `room:${uppercaseId}:offer`,
+                    `room:${uppercaseId}:answer`,
+                    `room:${uppercaseId}:ice:caller`,
+                    `room:${uppercaseId}:ice:callee`,
+                    `room:${uppercaseId}:profile:caller`,
+                    `room:${uppercaseId}:profile:callee`
+                  );
+                  await redis.srem("active_rooms", uppercaseId);
+                } catch (cErr) {
+                  console.warn("[Signal SSE] Redis cleanup error:", cErr);
+                }
+              }
             }
           }, 5_000);
         }

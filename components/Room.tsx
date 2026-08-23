@@ -54,13 +54,23 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   }, []);
 
   const cleanup = useCallback(() => {
+    try {
+      fetch("/api/signal/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomId }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      /* ignore */
+    }
     geminiRef.current?.disconnect();
     peerRef.current?.close();
     workletNodeRef.current?.disconnect();
     micSourceRef.current?.disconnect();
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     audioCtxRef.current?.close();
-  }, []);
+  }, [roomId]);
 
   useEffect(() => {
     let cancelled = false;

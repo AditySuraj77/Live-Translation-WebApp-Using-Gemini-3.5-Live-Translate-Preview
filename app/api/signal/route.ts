@@ -1,5 +1,6 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateRoom, encodeSSE, type SignalEvent } from "@/lib/room-store";
+import { getRedis } from "@/lib/redis";
 
 export async function POST(req: NextRequest) {
   try {
@@ -8,14 +9,35 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing roomId, type, or from" }, { status: 400 });
     }
 
+    const uppercaseId = roomId.toUpperCase();
     const event: SignalEvent = { type, payload, from };
-    const room = getOrCreateRoom(roomId);
+    const room = getOrCreateRoom(uppercaseId);
 
-    console.log(`[Signal POST] Room: ${roomId}, Event: ${type}, From: ${from}, Subscribers: ${room.subscribers.size}`);
+    console.log(`[Signal POST] Room: ${uppercaseId}, Event: ${type}, From: ${from}, Subscribers: ${room.subscribers.size}`);
 
-    // If caller sends offer and callee hasn't joined or closed, store/keep it
+    // 1. Sync to Redis for cross-instance Serverless signaling
+    const redis = getRedis();
+    if (redis) {
+      try {
+        if (type === "offer") {
+          await redis.set(`room:${uppercaseId}:offer`, JSON.stringify(payload), { ex: 120 });
+        } else if (type === "answer") {
+          await redis.set(`room:${uppercaseId}:answer`, JSON.stringify(payload), { ex: 120 });
+          // Callee joined and answered — set occupants = 2
+          await redis.set(`room:${uppercaseId}:occupants`, 2, { ex: 120 });
+        } else if (type === "ice") {
+          await redis.rpush(`room:${uppercaseId}:ice:${from}`, JSON.stringify(payload));
+          await redis.expire(`room:${uppercaseId}:ice:${from}`, 120);
+        } else if (type === "profile") {
+          await redis.set(`room:${uppercaseId}:profile:${from}`, JSON.stringify(payload), { ex: 120 });
+        }
+      } catch (rErr) {
+        console.warn("[Signal POST] Redis write error:", rErr);
+      }
+    }
+
+    // 2. In-memory queue & local broadcast fallback
     if (type === "offer") {
-      // replace any previous offer in queue
       room.queue = room.queue.filter((e) => e.type !== "offer");
       room.queue.push(event);
     } else if (type === "answer") {
@@ -24,7 +46,6 @@ export async function POST(req: NextRequest) {
       room.queue.push(event);
     }
 
-    // Broadcast to any active subscribers
     const encoded = encodeSSE(event);
     for (const ctrl of Array.from(room.subscribers)) {
       try {
