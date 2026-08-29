@@ -40,10 +40,12 @@ export function createTranslatedMediaStream(ctx: AudioContext): {
   node: MediaStreamAudioDestinationNode;
   stream: MediaStream;
   enqueue: (buf: AudioBuffer) => void;
+  flush: () => void;
 } {
   const dest = ctx.createMediaStreamDestination();
   let nextPlayTime = 0;
-  const JITTER_BUFFER_SEC = 0.06; // 60ms initial buffer to prevent network packet gap stutter
+  const JITTER_BUFFER_SEC = 0.04; // 40ms lean jitter buffer for Google Meet-like low latency
+  const activeSources = new Set<AudioBufferSourceNode>();
 
   function enqueue(buf: AudioBuffer) {
     if (ctx.state === "suspended") {
@@ -53,8 +55,13 @@ export function createTranslatedMediaStream(ctx: AudioContext): {
     src.buffer = buf;
     src.connect(dest);
 
+    activeSources.add(src);
+    src.onended = () => {
+      activeSources.delete(src);
+    };
+
     const now = ctx.currentTime;
-    // If the queue was empty or fell behind, start with a tiny lead time (jitter buffer)
+    // If queue was empty or fell behind, start with minimal lead time (40ms)
     if (nextPlayTime <= now) {
       nextPlayTime = now + JITTER_BUFFER_SEC;
     }
@@ -63,5 +70,18 @@ export function createTranslatedMediaStream(ctx: AudioContext): {
     nextPlayTime += buf.duration;
   }
 
-  return { node: dest, stream: dest.stream, enqueue };
+  function flush() {
+    for (const src of Array.from(activeSources)) {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+    activeSources.clear();
+    nextPlayTime = ctx.currentTime;
+  }
+
+  return { node: dest, stream: dest.stream, enqueue, flush };
 }

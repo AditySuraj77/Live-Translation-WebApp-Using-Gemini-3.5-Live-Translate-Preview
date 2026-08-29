@@ -20,6 +20,8 @@ function buildPrimaryConfig(targetBcp47: string): LiveConnectConfig {
       targetLanguageCode: targetBcp47,
       echoTargetLanguage: false,
     },
+    outputAudioTranscription: {},
+    inputAudioTranscription: {},
   };
 }
 
@@ -32,10 +34,12 @@ function buildFallbackConfig(
     systemInstruction: {
       parts: [
         {
-          text: `You are an expert real-time simultaneous speech interpreter. The user is speaking in ${sourceLangLabel}. Translate their speech accurately and naturally into ${targetLangLabel}. Speak only the clean translated speech in ${targetLangLabel}. Maintain complete sentence context and natural flow even across short pauses. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
+          text: `You are an expert real-time simultaneous speech interpreter (like Google Meet Live Translate). The user is speaking in ${sourceLangLabel}. Translate their speech accurately and naturally into ${targetLangLabel} in real-time as fast as possible. Speak only the clean translated speech in ${targetLangLabel}. Maintain complete sentence context and natural flow even across short pauses. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
         },
       ],
     },
+    outputAudioTranscription: {},
+    inputAudioTranscription: {},
   };
 }
 
@@ -44,6 +48,7 @@ export class GeminiLiveSession {
   private _ai: GoogleGenAI;
   private _onAudioOutput?: (pcm: ArrayBuffer, sampleRate: number) => void;
   private _onTranscript?: (text: string) => void;
+  private _onInterrupted?: () => void;
   private _onError?: (err: string) => void;
   private _connected = false;
 
@@ -108,7 +113,22 @@ export class GeminiLiveSession {
   }
 
   private _handleMessage(msg: LiveServerMessage): void {
-    // 1. Check for audio in model turn parts
+    // Check for interruption signal from server (Barge-in)
+    if (msg.serverContent?.interrupted) {
+      console.log("[Gemini Live] Server detected interruption / barge-in");
+      this._onInterrupted?.();
+    }
+
+    // 1. Check for output transcription (Translated text stream from Gemini)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const serverContent = msg.serverContent as any;
+    const outputText = serverContent?.outputTranscription?.text || serverContent?.output_transcription?.text;
+    if (outputText) {
+      console.log("[Gemini Live] Output transcript received:", outputText);
+      this._onTranscript?.(outputText);
+    }
+
+    // 2. Check for audio in model turn parts
     const parts = msg.serverContent?.modelTurn?.parts;
     if (parts && Array.isArray(parts)) {
       for (const part of parts) {
@@ -121,13 +141,13 @@ export class GeminiLiveSession {
           this._onAudioOutput?.(pcmBytes, sampleRate);
         }
         if (part.text) {
-          console.log("[Gemini Live] Model text:", part.text);
+          console.log("[Gemini Live] Model text part:", part.text);
           this._onTranscript?.(part.text);
         }
       }
     }
 
-    // 2. Convenience getter fallback
+    // 3. Convenience getter fallback
     if ((!parts || parts.length === 0) && msg.data) {
       const pcmBytes = base64ToArrayBuffer(msg.data);
       console.log(`[Gemini Live] Received msg.data audio chunk: ${pcmBytes.byteLength} bytes`);
@@ -157,6 +177,10 @@ export class GeminiLiveSession {
 
   onTranscript(cb: (text: string) => void): void {
     this._onTranscript = cb;
+  }
+
+  onInterrupted(cb: () => void): void {
+    this._onInterrupted = cb;
   }
 
   onError(cb: (err: string) => void): void {

@@ -143,7 +143,7 @@ export async function GET(req: NextRequest) {
                 }
               }
             }
-          }, 5_000);
+          }, 15_000);
         }
 
         try {

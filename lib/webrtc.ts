@@ -26,10 +26,12 @@ export class PeerManager {
   private targetLang?: string;
   private myProfile?: UserProfileInfo;
   private sse: EventSource | null = null;
+  private dataChannel: RTCDataChannel | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private _onRemoteStream?: (stream: MediaStream) => void;
   private _onStatusChange?: (status: string) => void;
   private _onPeerProfile?: (profile: UserProfileInfo) => void;
+  private _onCaption?: (text: string) => void;
 
   constructor(
     roomId: string,
@@ -45,6 +47,17 @@ export class PeerManager {
     this.targetLang = targetLang;
     this.myProfile = myProfile;
     this.pc = new RTCPeerConnection({ iceServers: iceServers && iceServers.length > 0 ? iceServers : STUN_SERVERS });
+
+    if (this.role === "caller") {
+      this.dataChannel = this.pc.createDataChannel("live-captions", { ordered: true });
+      this._setupDataChannel(this.dataChannel);
+    } else {
+      this.pc.ondatachannel = (event) => {
+        console.log(`[WebRTC (${this.role})] DataChannel connected:`, event.channel.label);
+        this.dataChannel = event.channel;
+        this._setupDataChannel(this.dataChannel);
+      };
+    }
 
     this.pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
@@ -71,6 +84,32 @@ export class PeerManager {
     };
   }
 
+  private _setupDataChannel(dc: RTCDataChannel): void {
+    dc.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "caption" && msg.text) {
+          this._onCaption?.(msg.text);
+        }
+      } catch {
+        if (typeof event.data === "string") {
+          this._onCaption?.(event.data);
+        }
+      }
+    };
+  }
+
+  /** Send real-time caption text over WebRTC DataChannel (Direct P2P, <5ms) */
+  sendCaption(text: string): void {
+    if (this.dataChannel && this.dataChannel.readyState === "open") {
+      try {
+        this.dataChannel.send(JSON.stringify({ type: "caption", text }));
+      } catch (err) {
+        console.warn("[WebRTC] Failed to send caption over DataChannel:", err);
+      }
+    }
+  }
+
   /** Add the Gemini-translated audio stream as the outgoing track */
   addTranslatedTrack(stream: MediaStream): void {
     const tracks = stream.getAudioTracks();
@@ -90,6 +129,10 @@ export class PeerManager {
 
   onPeerProfile(cb: (profile: UserProfileInfo) => void): void {
     this._onPeerProfile = cb;
+  }
+
+  onCaption(cb: (text: string) => void): void {
+    this._onCaption = cb;
   }
 
   /** Start signaling — opens SSE and begins offer/answer exchange */

@@ -2,14 +2,14 @@
  * AudioWorklet processor: captures mic Float32 audio,
  * applies anti-aliasing low-pass filter,
  * downsamples to 16kHz using boundary-safe linear interpolation,
- * converts to Int16 PCM, and posts 100ms chunks (1600 samples) to main thread.
+ * converts to Int16 PCM, and posts 40ms chunks (640 samples) to main thread.
  */
 class AudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._buffer = [];
     this._targetSampleRate = 16000;
-    this._chunkSize = 1600; // 100ms at 16kHz
+    this._chunkSize = 640; // 40ms at 16kHz for ultra-low latency streaming
     this._resampleRatio = sampleRate / this._targetSampleRate;
     this._sourceIndex = 0;
     this._lastSample = 0;
@@ -78,7 +78,7 @@ class AudioProcessor extends AudioWorkletProcessor {
     this._sourceIndex -= len;
     this._lastSample = filtered[len - 1];
 
-    // 3. Dispatch chunks of 1600 Int16 samples (100ms @ 16kHz)
+    // 3. Dispatch chunks of 640 Int16 samples (40ms @ 16kHz)
     while (this._buffer.length >= this._chunkSize) {
       const chunk = this._buffer.splice(0, this._chunkSize);
       

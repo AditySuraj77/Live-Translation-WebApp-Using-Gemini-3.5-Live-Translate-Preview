@@ -32,10 +32,17 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const [webrtcState, setWebrtcState] = useState<string>("initializing");
   const [geminiConnected, setGeminiConnected] = useState(false);
   const [muted, setMuted] = useState(false);
+  const mutedRef = useRef(false);
+  mutedRef.current = muted;
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isReceivingAudio, setIsReceivingAudio] = useState(false);
   const [lastTranscript, setLastTranscript] = useState<string>("");
+  const [peerTranscript, setPeerTranscript] = useState<string>("");
+  const [showCaptions, setShowCaptions] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const myTranscriptTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const peerTranscriptTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const geminiRef = useRef<GeminiLiveSession | null>(null);
@@ -44,6 +51,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const enqueueRef = useRef<((buf: AudioBuffer) => void) | null>(null);
+  const flushRef = useRef<(() => void) | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const receivingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -54,23 +62,13 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   }, []);
 
   const cleanup = useCallback(() => {
-    try {
-      fetch("/api/signal/leave", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ roomId }),
-        keepalive: true,
-      }).catch(() => {});
-    } catch {
-      /* ignore */
-    }
     geminiRef.current?.disconnect();
     peerRef.current?.close();
     workletNodeRef.current?.disconnect();
     micSourceRef.current?.disconnect();
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     audioCtxRef.current?.close();
-  }, [roomId]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -119,8 +117,9 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         micSource.connect(workletNode);
 
         // 4. Translated audio output stream (fed by Gemini) -> WebRTC track
-        const { stream: translatedStream, enqueue } = createTranslatedMediaStream(ctx);
+        const { stream: translatedStream, enqueue, flush } = createTranslatedMediaStream(ctx);
         enqueueRef.current = enqueue;
+        flushRef.current = flush;
 
         // 5. Gemini Live session
         const gemini = new GeminiLiveSession(token);
@@ -137,7 +136,20 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         });
 
         gemini.onTranscript((text) => {
-          setLastTranscript((prev) => (prev ? `${prev} ${text}` : text).slice(-200));
+          setLastTranscript((prev) => (prev ? `${prev} ${text}` : text).slice(-300));
+          // Send translated subtitle to peer over WebRTC DataChannel (P2P, <5ms)
+          peerRef.current?.sendCaption(text);
+
+          if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
+          myTranscriptTimerRef.current = setTimeout(() => {
+            setLastTranscript("");
+          }, 6000);
+        });
+
+        gemini.onInterrupted(() => {
+          console.log("[Room] Gemini Live Interrupted - Flushing audio queue");
+          flushRef.current?.();
+          setIsReceivingAudio(false);
         });
 
         gemini.onError((err) => {
@@ -159,7 +171,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         // 6. Route mic worklet chunks -> Gemini Live API
         let speakTimer: NodeJS.Timeout | null = null;
         workletNode.port.onmessage = (evt) => {
-          if (evt.data?.type === "audio" && !muted) {
+          if (evt.data?.type === "audio" && !mutedRef.current) {
             if (evt.data.isSpeech) {
               setIsSpeaking(true);
               if (speakTimer) clearTimeout(speakTimer);
@@ -217,6 +229,16 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           setPeerProfile(prof);
         });
 
+        // Receive real-time subtitles from peer over DataChannel
+        peer.onCaption((captionText) => {
+          console.log("[Room] Peer caption received over DataChannel:", captionText);
+          setPeerTranscript((prev) => (prev ? `${prev} ${captionText}` : captionText).slice(-300));
+          if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
+          peerTranscriptTimerRef.current = setTimeout(() => {
+            setPeerTranscript("");
+          }, 6000);
+        });
+
         peer.onStatusChange((s) => {
           setWebrtcState(s);
           if (s === "room_full") {
@@ -263,16 +285,31 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     handleUserGesture();
     const newMuted = !muted;
     setMuted(newMuted);
-    if (workletNodeRef.current) {
-      workletNodeRef.current.port.onmessage = (evt) => {
-        if (evt.data?.type === "audio" && !newMuted) {
-          geminiRef.current?.sendAudioChunk(evt.data.buffer);
-        }
-      };
+    mutedRef.current = newMuted;
+
+    if (newMuted) {
+      setIsSpeaking(false);
+    }
+
+    // Physically pause/resume mic stream at hardware/browser level
+    if (micStreamRef.current) {
+      micStreamRef.current.getAudioTracks().forEach((track) => {
+        track.enabled = !newMuted;
+      });
     }
   }
 
   function handleLeave() {
+    try {
+      fetch("/api/signal/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomId }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      /* ignore */
+    }
     cleanup();
     window.location.href = "/";
   }
@@ -412,11 +449,25 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
                 <span className="font-mono text-gray-400">{webrtcState}</span>
               </div>
             </div>
+          </div>
 
-            {lastTranscript && (
-              <div className="bg-black/50 border border-gray-800 p-3 rounded-xl text-xs text-gray-300">
-                <span className="text-gray-500 block mb-1">Live Translation Text:</span>
-                {lastTranscript}
+          {/* Pure YouTube / Google Meet Style Fixed Floating Subtitles (100% Zero DOM Layout Shift) */}
+          <div className="fixed bottom-28 left-1/2 -translate-x-1/2 z-50 pointer-events-none w-full max-w-2xl px-4 flex flex-col items-center gap-1.5 text-center">
+            {showCaptions && peerTranscript && (
+              <div className="transition-opacity duration-200">
+                <span className="inline-block bg-black/80 backdrop-blur-sm text-white px-3.5 py-1.5 rounded-lg text-sm sm:text-base font-medium shadow-2xl leading-snug">
+                  <span className="text-emerald-400 font-bold mr-1.5">{peerProfile ? peerProfile.name : "Partner"}:</span>
+                  {peerTranscript}
+                </span>
+              </div>
+            )}
+
+            {showCaptions && lastTranscript && (
+              <div className="transition-opacity duration-200">
+                <span className="inline-block bg-black/80 backdrop-blur-sm text-white px-3.5 py-1.5 rounded-lg text-sm sm:text-base font-medium shadow-2xl leading-snug">
+                  <span className="text-indigo-400 font-bold mr-1.5">You:</span>
+                  {lastTranscript}
+                </span>
               </div>
             )}
           </div>
@@ -435,14 +486,14 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             </div>
           )}
 
-          {/* Controls */}
-          <div className="flex gap-4">
+          {/* Controls Toolbar */}
+          <div className="flex flex-wrap items-center justify-center gap-3">
             <button
               onClick={(e) => {
                 e.stopPropagation();
                 toggleMute();
               }}
-              className={`px-6 py-3 rounded-xl font-semibold transition shadow-md cursor-pointer ${
+              className={`px-5 py-3 rounded-xl font-semibold transition shadow-md cursor-pointer ${
                 muted
                   ? "bg-gray-700 hover:bg-gray-600 text-white"
                   : "bg-indigo-600 hover:bg-indigo-500 text-white"
@@ -451,12 +502,29 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               {muted ? "🔇 Unmute Mic" : "🎤 Mute Mic"}
             </button>
 
+            {/* Google Meet / YouTube style CC Button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowCaptions(!showCaptions);
+              }}
+              className={`px-4 py-3 rounded-xl font-semibold transition shadow-md cursor-pointer flex items-center gap-1.5 ${
+                showCaptions
+                  ? "bg-gray-800 hover:bg-gray-700 text-indigo-300 border border-indigo-500/40"
+                  : "bg-gray-900 hover:bg-gray-800 text-gray-500 border border-gray-800"
+              }`}
+              title="Toggle Live Subtitles (CC)"
+            >
+              <span className="text-xs font-bold px-1 py-0.5 rounded bg-black/50 border border-current">CC</span>
+              <span className="text-xs">{showCaptions ? "Captions ON" : "Captions OFF"}</span>
+            </button>
+
             <button
               onClick={(e) => {
                 e.stopPropagation();
                 handleLeave();
               }}
-              className="px-6 py-3 rounded-xl font-semibold bg-red-700 hover:bg-red-600 transition text-white shadow-md cursor-pointer"
+              className="px-5 py-3 rounded-xl font-semibold bg-red-700 hover:bg-red-600 transition text-white shadow-md cursor-pointer"
             >
               Leave Room
             </button>
