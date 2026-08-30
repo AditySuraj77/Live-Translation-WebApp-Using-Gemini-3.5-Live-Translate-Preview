@@ -16,20 +16,13 @@ const FALLBACK_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025";
 function buildPrimaryConfig(targetBcp47: string): LiveConnectConfig {
   return {
     responseModalities: ["AUDIO" as Modality],
-    speechConfig: {
-      voiceConfig: {
-        prebuiltVoiceConfig: {
-          voiceName: "Puck",
-        },
-      },
-    },
     translationConfig: {
       targetLanguageCode: targetBcp47,
       echoTargetLanguage: false,
     },
     outputAudioTranscription: {},
     inputAudioTranscription: {},
-  } as LiveConnectConfig;
+  };
 }
 
 function buildFallbackConfig(
@@ -38,13 +31,6 @@ function buildFallbackConfig(
 ): LiveConnectConfig {
   return {
     responseModalities: ["AUDIO" as Modality],
-    speechConfig: {
-      voiceConfig: {
-        prebuiltVoiceConfig: {
-          voiceName: "Puck",
-        },
-      },
-    },
     systemInstruction: {
       parts: [
         {
@@ -54,7 +40,7 @@ function buildFallbackConfig(
     },
     outputAudioTranscription: {},
     inputAudioTranscription: {},
-  } as LiveConnectConfig;
+  };
 }
 
 export class GeminiLiveSession {
