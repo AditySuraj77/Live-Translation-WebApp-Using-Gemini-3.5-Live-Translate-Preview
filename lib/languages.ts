@@ -1,4 +1,4 @@
-﻿// Add new languages here — they appear automatically in the UI selectors.
+// Add new languages here — they appear automatically in the UI selectors.
 // bcp47 must be a valid BCP-47 tag for gemini-3.5-live-translate-preview.
 
 export interface Language {
@@ -22,6 +22,20 @@ export const LANGUAGES: Language[] = [
   { code: "ko", label: "Korean (한국어)", bcp47: "ko" },
   { code: "it", label: "Italian (Italiano)", bcp47: "it" },
   { code: "tr", label: "Turkish (Türkçe)", bcp47: "tr" },
+  { code: "ta", label: "Tamil (தமிழ்)", bcp47: "ta" },
+  { code: "te", label: "Telugu (తెలుగు)", bcp47: "te" },
+  { code: "mr", label: "Marathi (मराठी)", bcp47: "mr" },
+  { code: "gu", label: "Gujarati (ગુજરાતી)", bcp47: "gu" },
+  { code: "ur", label: "Urdu (اردو)", bcp47: "ur" },
+  { code: "pa", label: "Punjabi (ਪੰਜਾਬੀ)", bcp47: "pa" },
+  { code: "kn", label: "Kannada (ಕನ್ನಡ)", bcp47: "kn" },
+  { code: "ml", label: "Malayalam (മലയാളം)", bcp47: "ml" },
+  { code: "vi", label: "Vietnamese (Tiếng Việt)", bcp47: "vi" },
+  { code: "th", label: "Thai (ไทย)", bcp47: "th" },
+  { code: "id", label: "Indonesian (Bahasa Indonesia)", bcp47: "id" },
+  { code: "nl", label: "Dutch (Nederlands)", bcp47: "nl" },
+  { code: "pl", label: "Polish (Polski)", bcp47: "pl" },
+  { code: "sv", label: "Swedish (Svenska)", bcp47: "sv" },
 ];
 
 export function findLanguage(code: string): Language {
