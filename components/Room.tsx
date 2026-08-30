@@ -91,6 +91,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: false,
+            sampleRate: 16000,
           },
           video: false,
         });
@@ -100,8 +101,8 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           return;
         }
 
-        // 3. AudioContext + AudioWorklet
-        const ctx = new AudioContext({ sampleRate: 48000 });
+        // 3. AudioContext + AudioWorklet (Native 16kHz for Zero Resampling Latency)
+        const ctx = new AudioContext({ sampleRate: 16000 });
         audioCtxRef.current = ctx;
         if (ctx.state === "suspended") {
           await ctx.resume();
