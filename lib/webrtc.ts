@@ -18,6 +18,21 @@ const STUN_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun2.l.google.com:19302" },
 ];
 
+export interface ChatMessagePayload {
+  id: string;
+  sender: string;
+  senderAvatar: string;
+  senderColor?: string;
+  text?: string;
+  file?: {
+    name: string;
+    size: number;
+    type: string;
+    dataUrl: string;
+  };
+  timestamp: number;
+}
+
 export class PeerManager {
   private pc: RTCPeerConnection;
   private roomId: string;
@@ -32,6 +47,7 @@ export class PeerManager {
   private _onStatusChange?: (status: string) => void;
   private _onPeerProfile?: (profile: UserProfileInfo) => void;
   private _onCaption?: (text: string) => void;
+  private _onChatMessage?: (msg: ChatMessagePayload) => void;
 
   constructor(
     roomId: string,
@@ -90,6 +106,8 @@ export class PeerManager {
         const msg = JSON.parse(event.data);
         if (msg.type === "caption" && msg.text) {
           this._onCaption?.(msg.text);
+        } else if (msg.type === "chat" && msg.payload) {
+          this._onChatMessage?.(msg.payload);
         }
       } catch {
         if (typeof event.data === "string") {
@@ -106,6 +124,17 @@ export class PeerManager {
         this.dataChannel.send(JSON.stringify({ type: "caption", text }));
       } catch (err) {
         console.warn("[WebRTC] Failed to send caption over DataChannel:", err);
+      }
+    }
+  }
+
+  /** Send P2P chat message or file attachment over WebRTC DataChannel */
+  sendChatMessage(payload: ChatMessagePayload): void {
+    if (this.dataChannel && this.dataChannel.readyState === "open") {
+      try {
+        this.dataChannel.send(JSON.stringify({ type: "chat", payload }));
+      } catch (err) {
+        console.warn("[WebRTC] Failed to send chat message over DataChannel:", err);
       }
     }
   }
@@ -133,6 +162,10 @@ export class PeerManager {
 
   onCaption(cb: (text: string) => void): void {
     this._onCaption = cb;
+  }
+
+  onChatMessage(cb: (msg: ChatMessagePayload) => void): void {
+    this._onChatMessage = cb;
   }
 
   /** Start signaling — opens SSE and begins offer/answer exchange */

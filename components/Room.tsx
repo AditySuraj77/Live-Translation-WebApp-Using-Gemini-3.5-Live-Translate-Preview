@@ -3,10 +3,11 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { findLanguage } from "@/lib/languages";
 import { GeminiLiveSession } from "@/lib/gemini-live";
-import { PeerManager } from "@/lib/webrtc";
+import { PeerManager, type ChatMessagePayload } from "@/lib/webrtc";
 import { pcmToAudioBuffer, createTranslatedMediaStream } from "@/lib/audio-utils";
 import { getStoredUserProfile, type UserProfile } from "@/lib/user-profile";
 import type { UserProfileInfo } from "@/lib/room-store";
+import ChatSidebar from "@/components/ChatSidebar";
 
 type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error" | "room_full";
 
@@ -39,6 +40,9 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const [lastTranscript, setLastTranscript] = useState<string>("");
   const [peerTranscript, setPeerTranscript] = useState<string>("");
   const [showCaptions, setShowCaptions] = useState(true);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessagePayload[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const myTranscriptTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -240,6 +244,18 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           }, 6000);
         });
 
+        // Receive real-time P2P chat messages and files over DataChannel
+        peer.onChatMessage((chatMsg) => {
+          console.log("[Room] Peer chat message received over DataChannel:", chatMsg);
+          setChatMessages((prev) => [...prev, chatMsg]);
+          setIsChatOpen((open) => {
+            if (!open) {
+              setUnreadCount((c) => c + 1);
+            }
+            return open;
+          });
+        });
+
         peer.onStatusChange((s) => {
           setWebrtcState(s);
           if (s === "room_full") {
@@ -281,6 +297,20 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
       remoteAudioRef.current.play().catch(console.warn);
     }
   };
+
+  const handleSendChatMessage = useCallback((text?: string, file?: ChatMessagePayload["file"]) => {
+    const payload: ChatMessagePayload = {
+      id: Math.random().toString(36).slice(2) + Date.now().toString(36),
+      sender: myProfile.name,
+      senderAvatar: myProfile.avatar,
+      senderColor: myProfile.color,
+      text,
+      file,
+      timestamp: Date.now(),
+    };
+    setChatMessages((prev) => [...prev, payload]);
+    peerRef.current?.sendChatMessage(payload);
+  }, [myProfile]);
 
   function toggleMute() {
     handleUserGesture();
@@ -520,6 +550,29 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               <span className="text-xs">{showCaptions ? "Captions ON" : "Captions OFF"}</span>
             </button>
 
+            {/* In-Room P2P Chat Toggle Button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsChatOpen(!isChatOpen);
+                if (!isChatOpen) setUnreadCount(0);
+              }}
+              className={`px-4 py-3 rounded-xl font-semibold transition shadow-md cursor-pointer flex items-center gap-2 relative ${
+                isChatOpen
+                  ? "bg-indigo-600 hover:bg-indigo-500 text-white"
+                  : "bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700"
+              }`}
+              title="Toggle Room Chat & Media"
+            >
+              <span>💬</span>
+              <span className="text-xs">{isChatOpen ? "Chat Open" : "Chat"}</span>
+              {!isChatOpen && unreadCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow animate-bounce">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -532,6 +585,15 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           </div>
         </>
       )}
+
+      {/* P2P In-Room Chat & File Sharing Drawer */}
+      <ChatSidebar
+        isOpen={isChatOpen}
+        onClose={() => setIsChatOpen(false)}
+        messages={chatMessages}
+        onSendMessage={handleSendChatMessage}
+        currentUserName={myProfile.name}
+      />
 
       {/* Audio element for receiving translated speech from remote peer */}
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
