@@ -20,7 +20,7 @@ export async function GET() {
 
     const tokenResponse = await ai.authTokens.create({
       config: {
-        uses: 1,
+        uses: 5,
         expireTime: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
         newSessionExpireTime: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       },
