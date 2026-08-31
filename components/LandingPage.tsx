@@ -140,30 +140,42 @@ export default function LandingPage() {
       console.warn("[Landing] Could not register room metadata ahead:", e);
     }
 
-    router.push(
-      `/room/${roomId}?myLang=${myLang}&targetLang=${targetLang}&role=caller`
-    );
+    const roomUrl = `/room/${roomId}?myLang=${myLang}&targetLang=${targetLang}&role=caller`;
+    setIsCreating(false);
+    setShowCreateModal(false);
+    fetchRooms(true);
+
+    const newTab = window.open(roomUrl, "_blank");
+    if (!newTab) {
+      router.push(roomUrl);
+    }
   }
 
-  // 1-Click Join handler from Free4Talk room card
+  // 1-Click Join handler from Free4Talk room card (opens in new tab)
   function handleQuickJoin(room: RoomInfo) {
     if (room.occupants >= 2) return;
     // Auto-align: guest speaks what the host is expecting (targetLang) and wants to hear hostLang
     const guestMyLang = room.targetLang;
     const guestTargetLang = room.hostLang;
+    const roomUrl = `/room/${room.id}?myLang=${guestMyLang}&targetLang=${guestTargetLang}&role=callee`;
 
-    router.push(
-      `/room/${room.id}?myLang=${guestMyLang}&targetLang=${guestTargetLang}&role=callee`
-    );
+    const newTab = window.open(roomUrl, "_blank");
+    if (!newTab) {
+      router.push(roomUrl);
+    }
   }
 
-  // Manual join handler
+  // Manual join handler (opens in new tab)
   function handleManualJoin() {
     const id = joinId.trim().toUpperCase();
     if (!id) return;
-    router.push(
-      `/room/${id}?myLang=${joinMyLang}&targetLang=${joinTargetLang}&role=callee`
-    );
+    const roomUrl = `/room/${id}?myLang=${joinMyLang}&targetLang=${joinTargetLang}&role=callee`;
+    setShowManualJoin(false);
+
+    const newTab = window.open(roomUrl, "_blank");
+    if (!newTab) {
+      router.push(roomUrl);
+    }
   }
 
   const filteredRooms = rooms.filter((r) => {
