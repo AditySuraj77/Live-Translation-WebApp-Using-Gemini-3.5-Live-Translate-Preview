@@ -36,6 +36,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const mutedRef = useRef(false);
   mutedRef.current = muted;
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPeerSpeaking, setIsPeerSpeaking] = useState(false);
   const [isReceivingAudio, setIsReceivingAudio] = useState(false);
   const [lastTranscript, setLastTranscript] = useState<string>("");
   const [peerTranscript, setPeerTranscript] = useState<string>("");
@@ -173,14 +174,24 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           return;
         }
 
-        // 6. Route mic worklet chunks -> Gemini Live API
+        // 6. Route mic worklet chunks -> Gemini Live API & broadcast instant speech state
         let speakTimer: NodeJS.Timeout | null = null;
+        let lastBroadcastedSpeech = false;
+
         workletNode.port.onmessage = (evt) => {
           if (evt.data?.type === "audio" && !mutedRef.current) {
             if (evt.data.isSpeech) {
               setIsSpeaking(true);
+              if (!lastBroadcastedSpeech) {
+                lastBroadcastedSpeech = true;
+                peerRef.current?.sendSpeakingState(true);
+              }
               if (speakTimer) clearTimeout(speakTimer);
-              speakTimer = setTimeout(() => setIsSpeaking(false), 300);
+              speakTimer = setTimeout(() => {
+                setIsSpeaking(false);
+                lastBroadcastedSpeech = false;
+                peerRef.current?.sendSpeakingState(false);
+              }, 350);
             }
 
             gemini.sendAudioChunk(evt.data.buffer);
@@ -232,6 +243,12 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         peer.onPeerProfile((prof) => {
           console.log("[Room] Peer profile updated:", prof);
           setPeerProfile(prof);
+        });
+
+        // Receive real-time speech activity state from peer over DataChannel (0ms visual turn-taking)
+        peer.onPeerSpeaking((speaking) => {
+          console.log("[Room] Peer speaking state received over DataChannel:", speaking);
+          setIsPeerSpeaking(speaking);
         });
 
         // Receive real-time subtitles from peer over DataChannel
@@ -418,43 +435,105 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               </span>
             </div>
 
-            {/* Two Participants Profile Cards (Left = You, Right = Partner) */}
+            {/* Two Participants Profile Cards (Left = You, Right = Partner) with Google Meet Style Active Speaker Rings */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {/* You */}
-              <div className="bg-gray-800/60 p-4 rounded-xl border border-gray-700/60 flex flex-col justify-between gap-3 shadow-inner">
-                <div className="flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-xl bg-indigo-950 border border-indigo-700/60 flex items-center justify-center text-2xl shrink-0 shadow">
-                    {myProfile.avatar}
+              <div
+                className={`p-4 rounded-xl border flex flex-col justify-between gap-3 shadow-inner transition-all duration-200 ${
+                  !muted && isSpeaking
+                    ? "bg-indigo-950/70 border-indigo-500 ring-2 ring-indigo-400 shadow-[0_0_20px_rgba(99,102,241,0.35)]"
+                    : "bg-gray-800/60 border-gray-700/60"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-11 h-11 rounded-xl bg-indigo-950 border flex items-center justify-center text-2xl shrink-0 shadow transition-all ${
+                        !muted && isSpeaking ? "border-indigo-400 ring-2 ring-indigo-400/50 scale-105" : "border-indigo-700/60"
+                      }`}
+                    >
+                      {myProfile.avatar}
+                    </div>
+                    <div>
+                      <span className="text-[10px] uppercase font-bold text-indigo-400 tracking-wider block">You</span>
+                      <p className="font-semibold text-white text-sm truncate max-w-[110px]">{myProfile.name}</p>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-[10px] uppercase font-bold text-indigo-400 tracking-wider block">You</span>
-                    <p className="font-semibold text-white text-sm truncate max-w-[130px]">{myProfile.name}</p>
-                  </div>
+
+                  {/* Visualizer wave bars */}
+                  {!muted && isSpeaking && (
+                    <div className="flex items-end gap-0.5 h-4 px-1.5 py-0.5 bg-indigo-900/60 rounded border border-indigo-500/40">
+                      <span className="w-1 bg-indigo-400 rounded-full h-full animate-[pulse_0.4s_infinite]" />
+                      <span className="w-1 bg-indigo-300 rounded-full h-2/3 animate-[pulse_0.6s_infinite]" />
+                      <span className="w-1 bg-indigo-400 rounded-full h-full animate-[pulse_0.5s_infinite]" />
+                    </div>
+                  )}
                 </div>
 
-                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-gray-800 text-xs">
-                  <span className="text-gray-400 text-[11px] block">You Speak:</span>
-                  <span className="font-semibold text-indigo-300">{myLang.label}</span>
+                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-gray-800 text-xs flex justify-between items-center">
+                  <div>
+                    <span className="text-gray-400 text-[10px] block">You Speak:</span>
+                    <span className="font-semibold text-indigo-300">{myLang.label}</span>
+                  </div>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                    muted
+                      ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                      : isSpeaking
+                      ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 animate-pulse"
+                      : "bg-gray-800 text-gray-400"
+                  }`}>
+                    {muted ? "🔇 Muted" : isSpeaking ? "🎙️ Speaking" : "👂 Listening"}
+                  </span>
                 </div>
               </div>
 
               {/* Partner */}
-              <div className="bg-gray-800/60 p-4 rounded-xl border border-gray-700/60 flex flex-col justify-between gap-3 shadow-inner">
-                <div className="flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-xl bg-emerald-950 border border-emerald-700/60 flex items-center justify-center text-2xl shrink-0 shadow">
-                    {peerProfile ? peerProfile.avatar : "👤"}
+              <div
+                className={`p-4 rounded-xl border flex flex-col justify-between gap-3 shadow-inner transition-all duration-200 ${
+                  isPeerSpeaking
+                    ? "bg-emerald-950/70 border-emerald-500 ring-2 ring-emerald-400 shadow-[0_0_25px_rgba(52,211,153,0.45)]"
+                    : "bg-gray-800/60 border-gray-700/60"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-11 h-11 rounded-xl bg-emerald-950 border flex items-center justify-center text-2xl shrink-0 shadow transition-all ${
+                        isPeerSpeaking ? "border-emerald-400 ring-2 ring-emerald-400/60 scale-105" : "border-emerald-700/60"
+                      }`}
+                    >
+                      {peerProfile ? peerProfile.avatar : "👤"}
+                    </div>
+                    <div>
+                      <span className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider block">Partner</span>
+                      <p className="font-semibold text-white text-sm truncate max-w-[110px]">
+                        {peerProfile ? peerProfile.name : "Waiting for partner..."}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider block">Partner</span>
-                    <p className="font-semibold text-white text-sm truncate max-w-[130px]">
-                      {peerProfile ? peerProfile.name : "Waiting for partner..."}
-                    </p>
-                  </div>
+
+                  {/* Partner Voice Equalizer Animation */}
+                  {isPeerSpeaking && (
+                    <div className="flex items-end gap-0.5 h-4 px-1.5 py-0.5 bg-emerald-900/60 rounded border border-emerald-500/40">
+                      <span className="w-1 bg-emerald-400 rounded-full h-full animate-[pulse_0.4s_infinite]" />
+                      <span className="w-1 bg-emerald-300 rounded-full h-3/4 animate-[pulse_0.55s_infinite]" />
+                      <span className="w-1 bg-emerald-400 rounded-full h-full animate-[pulse_0.45s_infinite]" />
+                    </div>
+                  )}
                 </div>
 
-                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-gray-800 text-xs">
-                  <span className="text-gray-400 text-[11px] block">Partner Hears / Speaks:</span>
-                  <span className="font-semibold text-emerald-300">{targetLang.label}</span>
+                <div className="bg-gray-900/80 p-2.5 rounded-lg border border-gray-800 text-xs flex justify-between items-center">
+                  <div>
+                    <span className="text-gray-400 text-[10px] block">Partner Hears/Speaks:</span>
+                    <span className="font-semibold text-emerald-300">{targetLang.label}</span>
+                  </div>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full transition-all ${
+                    isPeerSpeaking
+                      ? "bg-emerald-500/25 text-emerald-300 border border-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.3)]"
+                      : "bg-gray-800/80 text-gray-400 border border-gray-700/40"
+                  }`}>
+                    {isPeerSpeaking ? "🟢 Speaking..." : "⚪ Your turn (Listening)"}
+                  </span>
                 </div>
               </div>
             </div>

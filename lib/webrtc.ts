@@ -48,6 +48,7 @@ export class PeerManager {
   private _onPeerProfile?: (profile: UserProfileInfo) => void;
   private _onCaption?: (text: string) => void;
   private _onChatMessage?: (msg: ChatMessagePayload) => void;
+  private _onPeerSpeaking?: (isSpeaking: boolean) => void;
 
   constructor(
     roomId: string,
@@ -108,6 +109,8 @@ export class PeerManager {
           this._onCaption?.(msg.text);
         } else if (msg.type === "chat" && msg.payload) {
           this._onChatMessage?.(msg.payload);
+        } else if (msg.type === "speaking") {
+          this._onPeerSpeaking?.(Boolean(msg.isSpeaking));
         }
       } catch {
         if (typeof event.data === "string") {
@@ -124,6 +127,17 @@ export class PeerManager {
         this.dataChannel.send(JSON.stringify({ type: "caption", text }));
       } catch (err) {
         console.warn("[WebRTC] Failed to send caption over DataChannel:", err);
+      }
+    }
+  }
+
+  /** Send real-time speech activity state over WebRTC DataChannel (0ms, instant visual turn-taking) */
+  sendSpeakingState(isSpeaking: boolean): void {
+    if (this.dataChannel && this.dataChannel.readyState === "open") {
+      try {
+        this.dataChannel.send(JSON.stringify({ type: "speaking", isSpeaking }));
+      } catch (err) {
+        console.warn("[WebRTC] Failed to send speaking state:", err);
       }
     }
   }
@@ -166,6 +180,10 @@ export class PeerManager {
 
   onChatMessage(cb: (msg: ChatMessagePayload) => void): void {
     this._onChatMessage = cb;
+  }
+
+  onPeerSpeaking(cb: (isSpeaking: boolean) => void): void {
+    this._onPeerSpeaking = cb;
   }
 
   /** Start signaling — opens SSE and begins offer/answer exchange */
