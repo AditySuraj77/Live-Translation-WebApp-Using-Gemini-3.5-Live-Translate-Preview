@@ -19,11 +19,11 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const pair = findPairBySlug(slug);
   if (!pair) {
     return {
-      title: "Language Pair Not Found | LinguaLive",
+      title: "Language Pair Not Found | VoxLive",
     };
   }
 
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "https://lingualive.app";
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "https://voxlive.vercel.app";
   const canonicalUrl = `${baseUrl}/translate/${pair.slug}`;
 
   return {
@@ -37,7 +37,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
       title: pair.title,
       description: pair.metaDescription,
       url: canonicalUrl,
-      siteName: "LinguaLive",
+      siteName: "VoxLive",
       images: [
         {
           url: "/logo.jpg",
@@ -68,13 +68,14 @@ export default async function TranslatePairPage({ params }: PageProps) {
   const otherPairs = POPULAR_PAIRS.filter((p) => p.slug !== pair.slug).slice(0, 8);
   const fromClean = pair.fromLang.label.split(" (")[0];
   const toClean = pair.toLang.label.split(" (")[0];
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "https://voxlive.vercel.app";
 
   const pageSchema = {
     "@context": "https://schema.org",
     "@type": "WebPage",
     name: pair.title,
     description: pair.metaDescription,
-    url: `https://lingualive.app/translate/${pair.slug}`,
+    url: `${baseUrl}/translate/${pair.slug}`,
     breadcrumb: {
       "@type": "BreadcrumbList",
       itemListElement: [
@@ -82,19 +83,19 @@ export default async function TranslatePairPage({ params }: PageProps) {
           "@type": "ListItem",
           position: 1,
           name: "Home",
-          item: "https://lingualive.app",
+          item: baseUrl,
         },
         {
           "@type": "ListItem",
           position: 2,
           name: "Translate",
-          item: "https://lingualive.app/#rooms",
+          item: `${baseUrl}/#rooms`,
         },
         {
           "@type": "ListItem",
           position: 3,
           name: `${fromClean} to ${toClean}`,
-          item: `https://lingualive.app/translate/${pair.slug}`,
+          item: `${baseUrl}/translate/${pair.slug}`,
         },
       ],
     },
@@ -113,11 +114,11 @@ export default async function TranslatePairPage({ params }: PageProps) {
         <Link href="/" className="flex items-center gap-3">
           <img
             src="/logo.jpg"
-            alt="LinguaLive Logo"
+            alt="VoxLive Logo"
             className="w-9 h-9 rounded-xl border border-indigo-500/40 shadow-sm object-cover"
           />
           <span className="text-xl font-bold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-emerald-300 bg-clip-text text-transparent">
-            LinguaLive
+            VoxLive
           </span>
         </Link>
 

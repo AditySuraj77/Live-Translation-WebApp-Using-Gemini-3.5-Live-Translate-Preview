@@ -137,7 +137,7 @@ export function findPairBySlug(slug: string): SeoPair | null {
         toCode: to,
         fromLang,
         toLang,
-        title: `${fromClean} to ${toClean} Real-Time Voice Translator | LinguaLive`,
+        title: `${fromClean} to ${toClean} Real-Time Voice Translator | VoxLive`,
         h1: `${fromClean} to ${toClean} Real-Time Voice Translator`,
         metaDescription: `Speak ${fromClean} and hear real-time ${toClean} voice translation. Free 1-to-1 speech-to-speech call with live AI translation.`,
         keywords: [

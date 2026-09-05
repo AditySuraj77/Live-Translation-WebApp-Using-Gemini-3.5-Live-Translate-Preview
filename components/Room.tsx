@@ -144,7 +144,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
 
     async function fetchLocation() {
       try {
-        const cacheKey = `lingualive_loc_${role}`;
+        const cacheKey = `voxlive_loc_${role}`;
         const cached = typeof window !== "undefined" ? sessionStorage.getItem(cacheKey) : null;
         if (cached) {
           const parsed = JSON.parse(cached);
@@ -684,11 +684,11 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         <div className="flex items-center gap-2.5">
           <img
             src="/logo.jpg"
-            alt="LinguaLive Logo"
+            alt="VoxLive Logo"
             className="w-8 h-8 rounded-lg border border-indigo-500/40 object-cover shadow-[0_0_12px_rgba(99,102,241,0.3)]"
           />
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-emerald-300 bg-clip-text text-transparent">
-            LinguaLive
+            VoxLive
           </h1>
         </div>
         <p className="text-gray-400 text-xs sm:text-sm mt-1">

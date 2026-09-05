@@ -2,9 +2,9 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "LinguaLive — Real-Time Voice Translator",
-    short_name: "LinguaLive",
-    description: "Instant 1-to-1 voice-to-voice translation powered by Gemini Live AI across 28+ languages.",
+    name: "VoxLive — Real-Time Voice Translator",
+    short_name: "VoxLive",
+    description: "Instant 1-to-1 voice-to-voice translation powered by Gemini Live AI across 70+ languages.",
     start_url: "/",
     display: "standalone",
     background_color: "#030712",

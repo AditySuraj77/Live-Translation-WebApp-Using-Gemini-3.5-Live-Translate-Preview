@@ -7,15 +7,16 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "https://lingualive.app"),
-  title: "LinguaLive — Real-Time Voice Translator | Free 1-to-1 Speech Translation Online",
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "https://voxlive.vercel.app"),
+  title: "VoxLive — Real-Time Voice Translator | Free 1-to-1 Speech Translation Online",
   description:
-    "Break language barriers instantly. LinguaLive is a free real-time speech-to-speech voice translator powered by Gemini Live AI. Speak naturally in your native language and hear live translated audio across 70+ languages simultaneously.",
+    "Break language barriers instantly. VoxLive is a free real-time speech-to-speech voice translator powered by Gemini Live AI. Speak naturally in your native language and hear live translated audio across 70+ languages simultaneously.",
   keywords: [
     "real-time voice translation",
     "speech to speech translator online",
     "live speech translation",
     "live conversation translator",
+    "voxlive translator",
     "google translate voice alternative",
     "free4talk alternative",
     "AI voice translator",
@@ -24,9 +25,9 @@ export const metadata: Metadata = {
     "low latency voice translator",
     "bilingual voice chat online",
   ],
-  authors: [{ name: "LinguaLive Team" }],
-  creator: "LinguaLive",
-  publisher: "LinguaLive",
+  authors: [{ name: "VoxLive Team" }],
+  creator: "VoxLive",
+  publisher: "VoxLive",
   robots: {
     index: true,
     follow: true,
@@ -48,9 +49,9 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     locale: "en_US",
-    url: "https://lingualive.app",
-    siteName: "LinguaLive",
-    title: "LinguaLive — Real-Time Voice Translator | Free 1-to-1 Speech Translation",
+    url: "https://voxlive.vercel.app",
+    siteName: "VoxLive",
+    title: "VoxLive — Real-Time Voice Translator | Free 1-to-1 Speech Translation",
     description:
       "Speak naturally in your native language and hear your partner in real time across 70+ languages with zero lag. Powered by Gemini Live AI.",
     images: [
@@ -58,13 +59,13 @@ export const metadata: Metadata = {
         url: "/logo.jpg",
         width: 1024,
         height: 1024,
-        alt: "LinguaLive — Real-Time Voice Translator Logo",
+        alt: "VoxLive — Real-Time Voice Translator Logo",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "LinguaLive — Real-Time Voice Translator",
+    title: "VoxLive — Real-Time Voice Translator",
     description: "Instant 1-on-1 speech-to-speech conversation translation across 70+ languages.",
     images: ["/logo.jpg"],
   },
@@ -73,7 +74,7 @@ export const metadata: Metadata = {
 const jsonLd = {
   "@context": "https://schema.org",
   "@type": "WebApplication",
-  name: "LinguaLive",
+  name: "VoxLive",
   applicationCategory: "CommunicationApplication",
   operatingSystem: "All",
   description:
@@ -98,15 +99,15 @@ const faqJsonLd = {
   mainEntity: [
     {
       "@type": "Question",
-      name: "Is LinguaLive completely free to use?",
+      name: "Is VoxLive completely free to use?",
       acceptedAnswer: {
         "@type": "Answer",
-        text: "Yes, LinguaLive is 100% free with no subscription, credit card, or account signup required. You can start or join a bilingual voice room immediately.",
+        text: "Yes, VoxLive is 100% free with no subscription, credit card, or account signup required. You can start or join a bilingual voice room immediately.",
       },
     },
     {
       "@type": "Question",
-      name: "How does real-time voice-to-voice translation work on LinguaLive?",
+      name: "How does real-time voice-to-voice translation work on VoxLive?",
       acceptedAnswer: {
         "@type": "Answer",
         text: "When you speak into your microphone, your raw audio is streamed continuously via WebSockets to Gemini Live Translate AI. The AI translates your speech simultaneously and streams natural synthesized voice audio to your partner over peer-to-peer WebRTC with sub-second latency.",
@@ -117,7 +118,7 @@ const faqJsonLd = {
       name: "Do I need to push a button every time I speak?",
       acceptedAnswer: {
         "@type": "Answer",
-        text: "No! Unlike traditional translation apps that require pressing a button back-and-forth, LinguaLive operates continuously like a normal phone call. You speak freely in your language, and your partner hears the translated voice automatically.",
+        text: "No! Unlike traditional translation apps that require pressing a button back-and-forth, VoxLive operates continuously like a normal phone call. You speak freely in your language, and your partner hears the translated voice automatically.",
       },
     },
     {

@@ -222,12 +222,12 @@ export default function LandingPage() {
         <div className="flex items-center gap-3.5">
           <img
             src="/logo.jpg"
-            alt="LinguaLive Logo"
+            alt="VoxLive Logo"
             className="w-10 h-10 rounded-xl border border-indigo-500/40 shadow-[0_0_15px_rgba(99,102,241,0.25)] object-cover"
           />
           <div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-emerald-300 bg-clip-text text-transparent">
-              LinguaLive
+              VoxLive
             </h1>
             <p className="text-xs text-gray-400">
               Real-Time 1-to-1 Voice Translation Lounge

@@ -1,7 +1,7 @@
 import type { MetadataRoute } from "next";
 
 export default function robots(): MetadataRoute.Robots {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "https://lingualive.app";
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "https://voxlive.vercel.app";
 
   return {
     rules: [
