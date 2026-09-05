@@ -204,11 +204,9 @@ export class GeminiLiveSession {
           const mimeType = part.inlineData.mimeType || "";
           const rateMatch = mimeType.match(/rate=(\d+)/);
           const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
-          console.log(`[Gemini Live] Received audio chunk: ${pcmBytes.byteLength} bytes @ ${sampleRate}Hz`);
           this._onAudioOutput?.(pcmBytes, sampleRate);
         }
         if (part.text) {
-          console.log("[Gemini Live] Model text part:", part.text);
           this._onTranscript?.(part.text);
         }
       }
@@ -217,7 +215,6 @@ export class GeminiLiveSession {
     // 3. Convenience getter fallback
     if ((!parts || parts.length === 0) && msg.data) {
       const pcmBytes = base64ToArrayBuffer(msg.data);
-      console.log(`[Gemini Live] Received msg.data audio chunk: ${pcmBytes.byteLength} bytes`);
       this._onAudioOutput?.(pcmBytes, 24000);
     }
   }
