@@ -39,6 +39,9 @@ export const metadata: Metadata = {
       "max-snippet": -1,
     },
   },
+  verification: {
+    google: "rnVHJvR55vlcTVlZqs2ebjqO9fgMimULMjSvGzyvdaw",
+  },
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },
