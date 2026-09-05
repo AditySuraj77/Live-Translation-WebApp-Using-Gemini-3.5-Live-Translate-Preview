@@ -121,7 +121,7 @@ export default function LandingPage() {
       roomTitle.trim() || `${profile.name}'s ${myLangObj.label} Lounge`;
 
     try {
-      await fetch("/api/rooms", {
+      const res = await fetch("/api/rooms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -136,6 +136,15 @@ export default function LandingPage() {
           },
         }),
       });
+
+      if (!res.ok) {
+        const data = await res.json();
+        if (data.code === "ROOM_CAP_REACHED" || data.error) {
+          alert(data.error || "All 20 call channels are currently active. Please wait a minute for a slot to free up!");
+          setIsCreating(false);
+          return;
+        }
+      }
     } catch (e) {
       console.warn("[Landing] Could not register room metadata ahead:", e);
     }
@@ -169,7 +178,19 @@ export default function LandingPage() {
   function handleManualJoin() {
     const id = joinId.trim().toUpperCase();
     if (!id) return;
-    const roomUrl = `/room/${id}?myLang=${joinMyLang}&targetLang=${joinTargetLang}&role=callee`;
+
+    const existing = rooms.find((r) => r.id.toUpperCase() === id);
+    if (existing && existing.occupants >= 2) {
+      alert("This room is already full (2/2 participants). Please wait or choose another room.");
+      return;
+    }
+
+    // Auto-align languages if joining an existing room:
+    // Guest speaks host's target language, and hears host's native language
+    const finalMyLang = existing ? existing.targetLang : joinMyLang;
+    const finalTargetLang = existing ? existing.hostLang : joinTargetLang;
+
+    const roomUrl = `/room/${id}?myLang=${finalMyLang}&targetLang=${finalTargetLang}&role=callee`;
     setShowManualJoin(false);
 
     const newTab = window.open(roomUrl, "_blank");
@@ -197,21 +218,25 @@ export default function LandingPage() {
   return (
     <main className="min-h-screen bg-gray-950 text-white flex flex-col items-center p-4 sm:p-8">
       {/* Top Navigation Bar */}
-      <header className="w-full max-w-5xl flex flex-wrap justify-between items-center py-4 border-b border-gray-800/80 mb-8 gap-4">
-        <div className="flex items-center gap-3">
-          <span className="text-3xl">🎙️</span>
+      <header className="w-full max-w-5xl flex flex-col sm:flex-row justify-between items-start sm:items-center py-4 border-b border-gray-800/80 mb-6 sm:mb-8 gap-4">
+        <div className="flex items-center gap-3.5">
+          <img
+            src="/logo.jpg"
+            alt="LinguaLive Logo"
+            className="w-10 h-10 rounded-xl border border-indigo-500/40 shadow-[0_0_15px_rgba(99,102,241,0.25)] object-cover"
+          />
           <div>
-            <h1 className="text-xl sm:text-2xl font-bold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-indigo-400 bg-clip-text text-transparent">
-              LiveTranslate
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-emerald-300 bg-clip-text text-transparent">
+              LinguaLive
             </h1>
             <p className="text-xs text-gray-400">
-              Free4Talk-Style 1-to-1 Voice Translation Lounge
+              Real-Time 1-to-1 Voice Translation Lounge
             </p>
           </div>
         </div>
 
         {/* User Profile Badge & Action Buttons */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5 w-full sm:w-auto justify-between sm:justify-end">
           <button
             onClick={() => {
               setEditName(profile.name);
@@ -219,14 +244,14 @@ export default function LandingPage() {
               setEditColor(profile.color || "indigo");
               setShowProfileModal(true);
             }}
-            className="flex items-center gap-2.5 bg-gray-900 hover:bg-gray-800 border border-gray-700/80 px-3.5 py-2 rounded-xl transition text-sm cursor-pointer shadow-sm group"
+            className="flex-1 sm:flex-none flex items-center gap-2 bg-gray-900 hover:bg-gray-800 border border-gray-700/80 px-3 py-2 rounded-xl transition text-sm cursor-pointer shadow-sm group min-w-0"
             title="Click to change your name and avatar"
           >
-            <span className="text-xl leading-none">{profile.avatar}</span>
-            <div className="flex flex-col text-left">
-              <span className="font-semibold text-white leading-tight flex items-center gap-1">
-                {profile.name}
-                <span className="text-[10px] text-gray-400 group-hover:text-indigo-400">✎</span>
+            <span className="text-xl leading-none shrink-0">{profile.avatar}</span>
+            <div className="flex flex-col text-left min-w-0">
+              <span className="font-semibold text-white leading-tight flex items-center gap-1 truncate text-xs sm:text-sm">
+                <span className="truncate">{profile.name}</span>
+                <span className="text-[10px] text-gray-400 group-hover:text-indigo-400 shrink-0">✎</span>
               </span>
               <span className="text-[10px] text-emerald-400">Online Profile</span>
             </div>
@@ -234,9 +259,9 @@ export default function LandingPage() {
 
           <button
             onClick={() => setShowCreateModal(true)}
-            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 transition px-4 py-2.5 rounded-xl font-semibold text-sm shadow-lg shadow-indigo-900/30 cursor-pointer"
+            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 transition px-3.5 sm:px-4 py-2.5 rounded-xl font-semibold text-xs sm:text-sm shadow-lg shadow-indigo-900/30 cursor-pointer whitespace-nowrap"
           >
-            <span className="text-lg font-bold leading-none">+</span>
+            <span className="text-base sm:text-lg font-bold leading-none">+</span>
             <span>Create Room</span>
           </button>
         </div>
@@ -390,19 +415,19 @@ export default function LandingPage() {
                     </div>
 
                     {/* Language Translation Flow Badge */}
-                    <div className="bg-gray-950/70 border border-gray-800/80 rounded-xl p-3 flex items-center justify-between text-xs">
-                      <div className="flex flex-col">
-                        <span className="text-gray-500">Host Speaks</span>
-                        <span className="font-semibold text-indigo-300">
+                    <div className="bg-gray-950/70 border border-gray-800/80 rounded-xl p-3 flex items-center justify-between text-xs gap-2">
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-gray-500 text-[11px] truncate">Host Speaks</span>
+                        <span className="font-semibold text-indigo-300 truncate">
                           {hostLang.label}
                         </span>
                       </div>
 
-                      <span className="text-gray-500 font-bold">⇄</span>
+                      <span className="text-gray-500 font-bold shrink-0">⇄</span>
 
-                      <div className="flex flex-col text-right">
-                        <span className="text-gray-500">Partner Speaks</span>
-                        <span className="font-semibold text-emerald-300">
+                      <div className="flex flex-col text-right min-w-0">
+                        <span className="text-emerald-400 font-medium text-[11px] truncate">👉 You Will Speak</span>
+                        <span className="font-semibold text-emerald-300 truncate">
                           {targetLang.label}
                         </span>
                       </div>
@@ -425,8 +450,8 @@ export default function LandingPage() {
                         </>
                       ) : (
                         <>
-                          <span>⚡</span>
-                          <span>Join Conversation</span>
+                          <span>💬</span>
+                          <span>Join as {targetLang.label.split(" ")[0]} Speaker</span>
                         </>
                       )}
                     </button>
@@ -500,12 +525,46 @@ export default function LandingPage() {
             </div>
           )}
         </div>
+
+        {/* Popular Language Pairs for Voice Translation (SEO & Fast Access) */}
+        <div className="border-t border-gray-800/80 pt-6 mt-2">
+          <div className="flex justify-between items-center mb-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+              Popular Live Voice Translation Pairs
+            </h3>
+            <span className="text-[11px] text-gray-500">70+ Languages</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {[
+              { slug: "english-to-spanish", label: "English ⇄ Spanish" },
+              { slug: "hindi-to-english", label: "Hindi ⇄ English" },
+              { slug: "english-to-french", label: "English ⇄ French" },
+              { slug: "english-to-german", label: "English ⇄ German" },
+              { slug: "english-to-japanese", label: "English ⇄ Japanese" },
+              { slug: "english-to-arabic", label: "English ⇄ Arabic" },
+              { slug: "english-to-portuguese", label: "English ⇄ Portuguese" },
+              { slug: "english-to-russian", label: "English ⇄ Russian" },
+              { slug: "english-to-chinese", label: "English ⇄ Chinese" },
+              { slug: "hindi-to-bengali", label: "Hindi ⇄ Bengali" },
+              { slug: "hindi-to-tamil", label: "Hindi ⇄ Tamil" },
+              { slug: "hindi-to-telugu", label: "Hindi ⇄ Telugu" },
+            ].map((p) => (
+              <a
+                key={p.slug}
+                href={`/translate/${p.slug}`}
+                className="text-xs bg-gray-900/60 hover:bg-gray-800 border border-gray-800 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg transition"
+              >
+                {p.label}
+              </a>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Edit Profile Modal */}
       {showProfileModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-md flex flex-col gap-5 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 sm:p-6 w-full max-w-md max-h-[90vh] overflow-y-auto flex flex-col gap-4 sm:gap-5 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
             <div className="flex justify-between items-center">
               <div>
                 <h2 className="font-bold text-lg text-white">Your Profile</h2>
@@ -578,8 +637,8 @@ export default function LandingPage() {
 
       {/* Create Room Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-md flex flex-col gap-5 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 sm:p-6 w-full max-w-md max-h-[90vh] overflow-y-auto flex flex-col gap-4 sm:gap-5 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
             <div className="flex justify-between items-center">
               <div>
                 <h2 className="font-bold text-lg text-white">Create a New Room</h2>

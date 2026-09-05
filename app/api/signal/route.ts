@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateRoom, encodeSSE, type SignalEvent } from "@/lib/room-store";
 import { getRedis } from "@/lib/redis";
+import { getPusherServer } from "@/lib/pusher-server";
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,7 +14,17 @@ export async function POST(req: NextRequest) {
     const event: SignalEvent = { type, payload, from };
     const room = getOrCreateRoom(uppercaseId);
 
-    console.log(`[Signal POST] Room: ${uppercaseId}, Event: ${type}, From: ${from}, Subscribers: ${room.subscribers.size}`);
+    console.log(`[Signal POST] Room: ${uppercaseId}, Event: ${type}, From: ${from}`);
+
+    // 0. Real-time WebSocket push via Pusher (<15ms, zero polling!)
+    const pusher = getPusherServer();
+    if (pusher) {
+      try {
+        await pusher.trigger(`presence-room-${uppercaseId}`, "signal", event);
+      } catch (pErr) {
+        console.warn("[Signal POST] Pusher trigger error:", pErr);
+      }
+    }
 
     // 1. Sync to Redis for cross-instance Serverless signaling
     const redis = getRedis();
@@ -23,8 +34,11 @@ export async function POST(req: NextRequest) {
           await redis.set(`room:${uppercaseId}:offer`, JSON.stringify(payload), { ex: 120 });
         } else if (type === "answer") {
           await redis.set(`room:${uppercaseId}:answer`, JSON.stringify(payload), { ex: 120 });
-          // Callee joined and answered — set occupants = 2
-          await redis.set(`room:${uppercaseId}:occupants`, 2, { ex: 120 });
+          // Callee joined and answered — set occupants = 2 (6h TTL for long calls)
+          await redis.set(`room:${uppercaseId}:occupants`, 2, { ex: 21600 });
+        } else if (type === "peer_joined") {
+          // Callee announced arrival — set occupants = 2
+          await redis.set(`room:${uppercaseId}:occupants`, 2, { ex: 21600 });
         } else if (type === "ice") {
           await redis.rpush(`room:${uppercaseId}:ice:${from}`, JSON.stringify(payload));
           await redis.expire(`room:${uppercaseId}:ice:${from}`, 120);

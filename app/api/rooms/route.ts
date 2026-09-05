@@ -13,15 +13,37 @@ export async function GET() {
     try {
       const activeIds: string[] = await redis.smembers("active_rooms");
       if (activeIds && activeIds.length > 0) {
+        const pipe = redis.pipeline();
         for (const id of activeIds) {
-          const metaRaw = await redis.get<string | RoomMetadata>(`room:${id}:meta`);
+          pipe.get(`room:${id}:meta`);
+          pipe.get(`room:${id}:occupants`);
+        }
+        const results = await pipe.exec();
+
+        const staleIds: string[] = [];
+        for (let i = 0; i < activeIds.length; i++) {
+          const id = activeIds[i];
+          const metaRaw = results[i * 2] as string | RoomMetadata | null;
+          const occRaw = results[i * 2 + 1];
+
           if (!metaRaw) {
-            // Clean up stale ID from active_rooms set
-            await redis.srem("active_rooms", id);
+            staleIds.push(id);
             continue;
           }
-          const meta: RoomMetadata = typeof metaRaw === "string" ? JSON.parse(metaRaw) : metaRaw;
-          const occupants = Number(await redis.get(`room:${id}:occupants`)) || 1;
+
+          let meta: RoomMetadata;
+          if (typeof metaRaw === "string") {
+            try {
+              meta = JSON.parse(metaRaw);
+            } catch {
+              staleIds.push(id);
+              continue;
+            }
+          } else {
+            meta = metaRaw;
+          }
+
+          const occupants = Number(occRaw) || 1;
 
           rooms.push({
             id,
@@ -38,6 +60,10 @@ export async function GET() {
             status: occupants >= 2 ? ("full" as const) : ("open" as const),
             createdAt: meta.createdAt || now,
           });
+        }
+
+        if (staleIds.length > 0) {
+          await redis.srem("active_rooms", ...staleIds);
         }
       }
 
@@ -113,6 +139,38 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing roomId" }, { status: 400 });
     }
 
+    const MAX_CONCURRENT_ROOMS = 20;
+    const redis = getRedis();
+
+    // Enforce 20 concurrent active rooms limit
+    if (redis) {
+      try {
+        const activeCount = await redis.scard("active_rooms");
+        if (activeCount >= MAX_CONCURRENT_ROOMS) {
+          console.warn(`[Rooms API] Room creation blocked: active count (${activeCount}) reached limit of ${MAX_CONCURRENT_ROOMS}`);
+          return NextResponse.json(
+            {
+              error: `All ${MAX_CONCURRENT_ROOMS} call channels are currently active. Please join an existing open room or wait a moment for a slot to free up!`,
+              code: "ROOM_CAP_REACHED",
+            },
+            { status: 429 }
+          );
+        }
+      } catch (cErr) {
+        console.warn("[Rooms API] Room count check warning:", cErr);
+      }
+    } else {
+      if (roomStore.size >= MAX_CONCURRENT_ROOMS) {
+        return NextResponse.json(
+          {
+            error: `All ${MAX_CONCURRENT_ROOMS} call channels are currently active. Please join an existing open room or wait a moment for a slot to free up!`,
+            code: "ROOM_CAP_REACHED",
+          },
+          { status: 429 }
+        );
+      }
+    }
+
     const uppercaseId = id.toUpperCase();
     const metadata: RoomMetadata = {
       id: uppercaseId,
@@ -123,11 +181,11 @@ export async function POST(req: NextRequest) {
       createdAt: Date.now(),
     };
 
-    const redis = getRedis();
     if (redis) {
       try {
-        await redis.set(`room:${uppercaseId}:meta`, JSON.stringify(metadata), { ex: 300 });
-        await redis.set(`room:${uppercaseId}:occupants`, 1, { ex: 300 });
+        // Active for up to 6 hours; Pusher channel_vacated webhook deletes it immediately upon exit
+        await redis.set(`room:${uppercaseId}:meta`, JSON.stringify(metadata), { ex: 21600 });
+        await redis.set(`room:${uppercaseId}:occupants`, 1, { ex: 21600 });
         await redis.sadd("active_rooms", uppercaseId);
       } catch (rErr) {
         console.warn("[Rooms API] Redis write warning:", rErr);

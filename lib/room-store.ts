@@ -5,7 +5,7 @@ export interface UserProfileInfo {
 }
 
 export interface SignalEvent {
-  type: "offer" | "answer" | "ice" | "room_full" | "profile";
+  type: "offer" | "answer" | "ice" | "room_full" | "profile" | "peer_left" | "peer_joined";
   payload: unknown;
   from: "caller" | "callee" | "system";
 }

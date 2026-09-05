@@ -43,18 +43,27 @@ export async function GET(req: NextRequest) {
       let hasDeliveredAnswer = false;
       let deliveredIceCount = 0;
       let hasDeliveredProfile = false;
+      let lastPeerLeftTimestamp = 0;
+      let consecutiveStablePolls = 0;
 
       const peerRole = role === "caller" ? "callee" : "caller";
 
-      // 2. Redis polling loop (400ms) for real-time cross-container delivery
+      // 2. Smart Adaptive Redis polling loop (400ms during handshake -> 6000ms once connected)
       let redisPollTimer: NodeJS.Timeout | null = null;
+      let pollIntervalMs = 400;
+      let isAborted = false;
 
       if (redis) {
         async function pollRedis() {
-          try {
-            if (!redis) return;
+          if (isAborted || !redis) return;
 
-            // Deliver Offer to Callee
+          try {
+            // Is handshake already complete?
+            const isHandshakeComplete =
+              (role === "callee" ? hasDeliveredOffer : hasDeliveredAnswer) &&
+              hasDeliveredProfile;
+
+            // Deliver Offer to Callee (Only if not yet delivered)
             if (role === "callee" && !hasDeliveredOffer) {
               const offerRaw = await redis.get<string | object>(`room:${uppercaseId}:offer`);
               if (offerRaw) {
@@ -64,7 +73,7 @@ export async function GET(req: NextRequest) {
               }
             }
 
-            // Deliver Answer to Caller
+            // Deliver Answer to Caller (Only if not yet delivered)
             if (role === "caller" && !hasDeliveredAnswer) {
               const answerRaw = await redis.get<string | object>(`room:${uppercaseId}:answer`);
               if (answerRaw) {
@@ -74,7 +83,7 @@ export async function GET(req: NextRequest) {
               }
             }
 
-            // Deliver Profile
+            // Deliver Profile (Only if not yet delivered)
             if (!hasDeliveredProfile) {
               const profileRaw = await redis.get<string | object>(`room:${uppercaseId}:profile:${peerRole}`);
               if (profileRaw) {
@@ -84,24 +93,58 @@ export async function GET(req: NextRequest) {
               }
             }
 
-            // Deliver new ICE candidates from peer
-            const iceKey = `room:${uppercaseId}:ice:${peerRole}`;
-            const iceCandidates = await redis.lrange(iceKey, deliveredIceCount, -1);
-            if (iceCandidates && iceCandidates.length > 0) {
-              for (const candRaw of iceCandidates) {
-                const payload = typeof candRaw === "string" ? JSON.parse(candRaw) : candRaw;
-                controller.enqueue(encodeSSE({ type: "ice", payload, from: peerRole }));
-                deliveredIceCount++;
+            // Check for peer_left event from peerRole
+            const peerLeftRaw = await redis.get<string | { role: string; timestamp: number }>(`room:${uppercaseId}:peer_left`);
+            if (peerLeftRaw) {
+              const data = typeof peerLeftRaw === "string" ? JSON.parse(peerLeftRaw) : peerLeftRaw;
+              if (data && data.role === peerRole && data.timestamp > lastPeerLeftTimestamp) {
+                lastPeerLeftTimestamp = data.timestamp;
+                controller.enqueue(encodeSSE({ type: "peer_left", payload: data, from: peerRole }));
+                // Reset delivery flags so that a NEW peer can deliver fresh profile, answer, & ICE!
+                hasDeliveredProfile = false;
+                hasDeliveredAnswer = false;
+                hasDeliveredOffer = false;
+                deliveredIceCount = 0;
+                consecutiveStablePolls = 0;
+                // Instantly ramp back up to 400ms for incoming new guest!
+                pollIntervalMs = 400;
               }
+            }
+
+            // Deliver new ICE candidates from peer (Only check if not in slow idle mode or if candidates still pending)
+            if (pollIntervalMs === 400 || deliveredIceCount === 0) {
+              const iceKey = `room:${uppercaseId}:ice:${peerRole}`;
+              const iceCandidates = await redis.lrange(iceKey, deliveredIceCount, -1);
+              if (iceCandidates && iceCandidates.length > 0) {
+                for (const candRaw of iceCandidates) {
+                  const payload = typeof candRaw === "string" ? JSON.parse(candRaw) : candRaw;
+                  controller.enqueue(encodeSSE({ type: "ice", payload, from: peerRole }));
+                  deliveredIceCount++;
+                }
+                consecutiveStablePolls = 0;
+              } else if (isHandshakeComplete) {
+                consecutiveStablePolls++;
+              }
+            }
+
+            // Adaptive backoff: if handshake is complete and ICE candidates have settled,
+            // switch to 6-second low-frequency check (saves 98% Upstash quota!)
+            if (isHandshakeComplete && consecutiveStablePolls >= 3 && pollIntervalMs === 400) {
+              console.log(`[Signal SSE] Handshake settled for room ${uppercaseId}. Transitioning to 6s backoff.`);
+              pollIntervalMs = 6000;
             }
           } catch (pErr) {
             console.warn("[Signal SSE] Redis poll error:", pErr);
           }
+
+          // Schedule next poll using dynamic interval
+          if (!isAborted) {
+            redisPollTimer = setTimeout(pollRedis, pollIntervalMs);
+          }
         }
 
         // Initial fetch immediately
-        await pollRedis();
-        redisPollTimer = setInterval(pollRedis, 400);
+        pollRedis();
       }
 
       // 3. Keepalive ping every 15s
@@ -115,35 +158,19 @@ export async function GET(req: NextRequest) {
 
       req.signal.addEventListener("abort", () => {
         console.log(`[Signal SSE] Subscriber (${role}) disconnected from room: ${uppercaseId}`);
+        isAborted = true;
         clearInterval(keepalive);
-        if (redisPollTimer) clearInterval(redisPollTimer);
+        if (redisPollTimer) clearTimeout(redisPollTimer);
         room.subscribers.delete(controller);
 
         if (room.subscribers.size === 0) {
           if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
-          room.cleanupTimer = setTimeout(async () => {
+          room.cleanupTimer = setTimeout(() => {
             if (room.subscribers.size === 0) {
-              console.log(`[Signal SSE] Cleaning up empty room: ${uppercaseId}`);
+              console.log(`[Signal SSE] Cleaning up local in-memory room: ${uppercaseId}`);
               roomStore.delete(uppercaseId);
-              if (redis) {
-                try {
-                  await redis.del(
-                    `room:${uppercaseId}:meta`,
-                    `room:${uppercaseId}:occupants`,
-                    `room:${uppercaseId}:offer`,
-                    `room:${uppercaseId}:answer`,
-                    `room:${uppercaseId}:ice:caller`,
-                    `room:${uppercaseId}:ice:callee`,
-                    `room:${uppercaseId}:profile:caller`,
-                    `room:${uppercaseId}:profile:callee`
-                  );
-                  await redis.srem("active_rooms", uppercaseId);
-                } catch (cErr) {
-                  console.warn("[Signal SSE] Redis cleanup error:", cErr);
-                }
-              }
             }
-          }, 15_000);
+          }, 45_000);
         }
 
         try {

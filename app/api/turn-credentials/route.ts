@@ -10,10 +10,26 @@ export async function GET() {
   const credential = process.env.EXPRESSTURN_PASSWORD;
 
   const iceServers: RTCIceServer[] = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
+    // 1. Google Public STUN (Preserved)
+    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+
+    // 2. Cloudflare Public STUN (Anycast high-availability backup)
+    { urls: ["stun:stun.cloudflare.com:3478"] },
+
+    // 3. Open Relay Project (20 GB/month Free, Ports 80 & 443 for Strict Firewalls / CGNAT)
+    {
+      urls: [
+        "turn:openrelay.metered.ca:80",
+        "turn:openrelay.metered.ca:443",
+        "turn:openrelay.metered.ca:443?transport=tcp",
+        "turns:openrelay.metered.ca:443?transport=tcp",
+      ],
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
   ];
 
+  // 4. ExpressTurn (Preserved 100%)
   if (username && credential) {
     iceServers.push(
       {

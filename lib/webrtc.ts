@@ -3,19 +3,20 @@
  */
 
 import type { UserProfileInfo } from "./room-store";
+import { getPusherClient } from "@/lib/pusher-client";
+import type { Channel } from "pusher-js";
 
 type Role = "caller" | "callee";
 
 interface SignalEvent {
-  type: "offer" | "answer" | "ice" | "profile" | "room_full";
+  type: "offer" | "answer" | "ice" | "profile" | "room_full" | "peer_left" | "peer_joined" | "promoted_to_host";
   payload: unknown;
   from: Role | "system";
 }
 
 const STUN_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"] },
+  { urls: ["stun:stun.cloudflare.com:3478"] },
 ];
 
 export interface ChatMessagePayload {
@@ -33,6 +34,15 @@ export interface ChatMessagePayload {
   timestamp: number;
 }
 
+export interface UserLocation {
+  city: string;
+  country: string;
+  countryCode: string;
+  flag: string;
+  lat: number;
+  lon: number;
+}
+
 export class PeerManager {
   private pc: RTCPeerConnection;
   private roomId: string;
@@ -40,15 +50,21 @@ export class PeerManager {
   private myLang?: string;
   private targetLang?: string;
   private myProfile?: UserProfileInfo;
+  private myLocation?: UserLocation;
+  private iceServers: RTCIceServer[];
+  private translatedStream: MediaStream | null = null;
   private sse: EventSource | null = null;
+  private pusherChannel: Channel | null = null;
   private dataChannel: RTCDataChannel | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private _onRemoteStream?: (stream: MediaStream) => void;
   private _onStatusChange?: (status: string) => void;
   private _onPeerProfile?: (profile: UserProfileInfo) => void;
+  private _onPeerLeft?: (role: string) => void;
   private _onCaption?: (text: string) => void;
   private _onChatMessage?: (msg: ChatMessagePayload) => void;
   private _onPeerSpeaking?: (isSpeaking: boolean) => void;
+  private _onPeerLocation?: (location: UserLocation) => void;
 
   constructor(
     roomId: string,
@@ -63,7 +79,8 @@ export class PeerManager {
     this.myLang = myLang;
     this.targetLang = targetLang;
     this.myProfile = myProfile;
-    this.pc = new RTCPeerConnection({ iceServers: iceServers && iceServers.length > 0 ? iceServers : STUN_SERVERS });
+    this.iceServers = iceServers && iceServers.length > 0 ? iceServers : STUN_SERVERS;
+    this.pc = new RTCPeerConnection({ iceServers: this.iceServers });
 
     if (this.role === "caller") {
       this.dataChannel = this.pc.createDataChannel("live-captions", { ordered: true });
@@ -76,6 +93,10 @@ export class PeerManager {
       };
     }
 
+    this._setupPeerConnectionListeners();
+  }
+
+  private _setupPeerConnectionListeners(): void {
     this.pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
         console.log(`[WebRTC (${this.role})] Local ICE candidate generated`);
@@ -93,6 +114,23 @@ export class PeerManager {
     this.pc.oniceconnectionstatechange = () => {
       console.log(`[WebRTC (${this.role})] ICE connection state: ${this.pc.iceConnectionState}`);
       this._onStatusChange?.(this.pc.iceConnectionState);
+
+      // Auto-recover on network interruption or switch (e.g. Wi-Fi to 5G)
+      if (this.pc.iceConnectionState === "failed") {
+        console.warn(`[WebRTC (${this.role})] ICE connection failed. Initiating seamless ICE restart...`);
+        if (typeof this.pc.restartIce === "function") {
+          try {
+            this.pc.restartIce();
+            if (this.role === "caller") {
+              this._createAndPostOffer().catch((err) =>
+                console.warn("[WebRTC] ICE restart offer failed:", err)
+              );
+            }
+          } catch (err) {
+            console.warn("[WebRTC] restartIce error:", err);
+          }
+        }
+      }
     };
 
     this.pc.onconnectionstatechange = () => {
@@ -102,6 +140,13 @@ export class PeerManager {
   }
 
   private _setupDataChannel(dc: RTCDataChannel): void {
+    dc.onopen = () => {
+      console.log(`[WebRTC (${this.role})] DataChannel open`);
+      if (this.myLocation) {
+        this.sendLocation(this.myLocation);
+      }
+    };
+
     dc.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
@@ -111,6 +156,8 @@ export class PeerManager {
           this._onChatMessage?.(msg.payload);
         } else if (msg.type === "speaking") {
           this._onPeerSpeaking?.(Boolean(msg.isSpeaking));
+        } else if (msg.type === "location" && msg.location) {
+          this._onPeerLocation?.(msg.location);
         }
       } catch {
         if (typeof event.data === "string") {
@@ -153,8 +200,21 @@ export class PeerManager {
     }
   }
 
+  /** Send user geographic location over WebRTC DataChannel */
+  sendLocation(location: UserLocation): void {
+    this.myLocation = location;
+    if (this.dataChannel && this.dataChannel.readyState === "open") {
+      try {
+        this.dataChannel.send(JSON.stringify({ type: "location", location }));
+      } catch (err) {
+        console.warn("[WebRTC] Failed to send location over DataChannel:", err);
+      }
+    }
+  }
+
   /** Add the Gemini-translated audio stream as the outgoing track */
   addTranslatedTrack(stream: MediaStream): void {
+    this.translatedStream = stream;
     const tracks = stream.getAudioTracks();
     console.log(`[WebRTC (${this.role})] Adding ${tracks.length} audio track(s)`);
     for (const track of tracks) {
@@ -174,6 +234,10 @@ export class PeerManager {
     this._onPeerProfile = cb;
   }
 
+  onPeerLeft(cb: (role: string) => void): void {
+    this._onPeerLeft = cb;
+  }
+
   onCaption(cb: (text: string) => void): void {
     this._onCaption = cb;
   }
@@ -186,9 +250,51 @@ export class PeerManager {
     this._onPeerSpeaking = cb;
   }
 
-  /** Start signaling — opens SSE and begins offer/answer exchange */
+  onPeerLocation(cb: (location: UserLocation) => void): void {
+    this._onPeerLocation = cb;
+  }
+
+  /** Reset RTCPeerConnection and send fresh offer when previous guest leaves and new guest arrives */
+  async resetAndCreateOfferForNewGuest(): Promise<void> {
+    console.log(`[WebRTC (${this.role})] Re-initializing PeerConnection for incoming guest...`);
+    try {
+      this.pc.close();
+    } catch {
+      /* ignore */
+    }
+
+    this.pendingCandidates = [];
+    this.pc = new RTCPeerConnection({ iceServers: this.iceServers });
+    this._setupPeerConnectionListeners();
+
+    if (this.role === "caller") {
+      this.dataChannel = this.pc.createDataChannel("live-captions", { ordered: true });
+      this._setupDataChannel(this.dataChannel);
+    } else {
+      this.pc.ondatachannel = (event) => {
+        this.dataChannel = event.channel;
+        this._setupDataChannel(this.dataChannel);
+      };
+    }
+
+    if (this.translatedStream) {
+      for (const track of this.translatedStream.getAudioTracks()) {
+        this.pc.addTrack(track, this.translatedStream);
+      }
+    }
+
+    if (this.role === "caller") {
+      await this._createAndPostOffer();
+    }
+
+    if (this.myProfile) {
+      await this._postSignal("profile", this.myProfile);
+    }
+  }
+
+  /** Start signaling — connects via Pusher real-time WebSocket with SSE fallback */
   async start(): Promise<void> {
-    this._openSSE();
+    this._connectSignaling();
 
     // Broadcast our profile to any active or joining peer
     if (this.myProfile) {
@@ -197,6 +303,77 @@ export class PeerManager {
 
     if (this.role === "caller") {
       await this._createAndPostOffer();
+    }
+  }
+
+  private _connectSignaling(): void {
+    const pusher = getPusherClient();
+    if (pusher) {
+      const channelName = `presence-room-${this.roomId.toUpperCase()}`;
+      console.log(`[WebRTC (${this.role})] Subscribing to Pusher channel: ${channelName}`);
+
+      const channel = pusher.subscribe(channelName);
+      this.pusherChannel = channel;
+
+      channel.bind("signal", async (signal: SignalEvent) => {
+        await this._handleSignal(signal);
+      });
+
+      channel.bind("pusher:subscription_succeeded", async (members: any) => {
+        console.log(`[WebRTC (${this.role})] Pusher subscription succeeded for ${channelName}. Members count:`, members?.count);
+        if (this.role === "caller" && members?.count > 1) {
+          console.log(`[WebRTC (${this.role})] Peer already in room upon subscription. Posting offer & profile...`);
+          if (this.myProfile) {
+            this._postSignal("profile", this.myProfile);
+          }
+          await this._createAndPostOffer();
+        }
+        if (this.role === "callee") {
+          console.log(`[WebRTC (${this.role})] Callee joined channel. Announcing presence to caller...`);
+          if (this.myProfile) {
+            this._postSignal("profile", this.myProfile);
+          }
+          this._postSignal("peer_joined", { role: "callee" });
+        }
+      });
+
+      // When guest joins the room, host immediately sends fresh offer
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      channel.bind("pusher:member_added", async (member: any) => {
+        console.log(`[WebRTC (${this.role})] Pusher member added:`, member);
+        if (this.role === "caller") {
+          console.log(`[WebRTC (${this.role})] Guest arrived in room! Sending profile and offer...`);
+          if (this.myProfile) {
+            this._postSignal("profile", this.myProfile);
+          }
+          await this._createAndPostOffer();
+        }
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      channel.bind("pusher:subscription_error", (err: any) => {
+        console.warn(`[WebRTC (${this.role})] Pusher subscription error:`, err);
+        if (err?.status === 403) {
+          this._onStatusChange?.("room_full");
+        } else {
+          // Fallback to SSE if Pusher connection encounters an error
+          this._openSSE();
+        }
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      channel.bind("pusher:member_removed", (member: any) => {
+        console.log(`[WebRTC (${this.role})] Pusher member removed:`, member);
+        const leftRole = this.role === "caller" ? "callee" : "caller";
+        this._onPeerLeft?.(leftRole);
+        if (this.role === "caller") {
+          this._onStatusChange?.("waiting_for_peer");
+          this.resetAndCreateOfferForNewGuest().catch(console.warn);
+        }
+      });
+    } else {
+      console.log(`[WebRTC (${this.role})] Pusher not available, using SSE stream`);
+      this._openSSE();
     }
   }
 
@@ -234,9 +411,44 @@ export class PeerManager {
 
     console.log(`[WebRTC (${this.role})] Received: ${signal.type} from ${signal.from}`);
 
+    if (signal.type === "peer_left") {
+      console.log(`[WebRTC (${this.role})] Peer left room:`, signal.payload);
+      this._onPeerLeft?.(signal.from || "callee");
+      if (this.role === "caller") {
+        this._onStatusChange?.("waiting_for_peer");
+        this.resetAndCreateOfferForNewGuest().catch(console.warn);
+      }
+      return;
+    }
+
+    if (signal.type === "peer_joined") {
+      console.log(`[WebRTC (${this.role})] Peer joined signal received:`, signal.payload);
+      if (this.role === "caller") {
+        console.log("[WebRTC (caller)] Re-sending offer to freshly joined peer");
+        if (this.myProfile) {
+          this._postSignal("profile", this.myProfile);
+        }
+        await this._createAndPostOffer();
+      }
+      return;
+    }
+
     if (signal.type === "profile" && signal.payload) {
       console.log(`[WebRTC (${this.role})] Received peer profile:`, signal.payload);
       this._onPeerProfile?.(signal.payload as UserProfileInfo);
+      if (this.role === "caller") {
+        if (
+          this.pc.connectionState === "disconnected" ||
+          this.pc.connectionState === "failed" ||
+          this.pc.iceConnectionState === "disconnected" ||
+          this.pc.iceConnectionState === "failed"
+        ) {
+          console.log("[WebRTC (caller)] Re-negotiating fresh offer for incoming guest profile");
+          this.resetAndCreateOfferForNewGuest().catch(console.warn);
+        } else if (this.pc.signalingState === "stable" && this.pc.connectionState !== "connected") {
+          this._createAndPostOffer().catch(console.warn);
+        }
+      }
       return;
     }
 
@@ -328,6 +540,11 @@ export class PeerManager {
   }
 
   close(): void {
+    if (this.pusherChannel) {
+      const pusher = getPusherClient();
+      pusher?.unsubscribe(`presence-room-${this.roomId.toUpperCase()}`);
+      this.pusherChannel = null;
+    }
     this.sse?.close();
     this.pc.close();
   }

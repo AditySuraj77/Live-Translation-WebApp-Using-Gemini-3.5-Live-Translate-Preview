@@ -13,9 +13,20 @@ import {
 const PRIMARY_MODEL = "models/gemini-3.5-live-translate-preview";
 const FALLBACK_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025";
 
-function buildPrimaryConfig(targetBcp47: string): LiveConnectConfig {
+function buildPrimaryConfig(
+  targetBcp47: string,
+  sourceLangLabel: string,
+  targetLangLabel: string
+): LiveConnectConfig {
   return {
     responseModalities: ["AUDIO" as Modality],
+    systemInstruction: {
+      parts: [
+        {
+          text: `You are an expert real-time simultaneous speech interpreter (like Google Meet Live Translate). The speaker is speaking in ${sourceLangLabel}. Listen attentively to their speech in ${sourceLangLabel} and continuously translate it into natural, fluent ${targetLangLabel} in real-time as fast as possible. Speak only the clean translated speech in ${targetLangLabel}. Maintain complete sentence context, natural prosody, and flow even across short pauses. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
+        },
+      ],
+    },
     translationConfig: {
       targetLanguageCode: targetBcp47,
       echoTargetLanguage: false,
@@ -50,13 +61,21 @@ export class GeminiLiveSession {
   private _onTranscript?: (text: string) => void;
   private _onInterrupted?: () => void;
   private _onError?: (err: string) => void;
+  private _onNeedReconnect?: () => void;
+  private _onGoAway?: () => void;
+  private _onClose?: (code: number, reason: string) => void;
+  private _resumptionHandle: string | null = null;
   private _connected = false;
 
-  constructor(authToken: string) {
+  constructor(authToken: string, resumptionHandle?: string) {
     this._ai = new GoogleGenAI({
       apiKey: authToken,
       httpOptions: { apiVersion: "v1alpha" },
     });
+    if (resumptionHandle) {
+      this._resumptionHandle = resumptionHandle;
+      console.log("[Gemini] Initialized with cached resumption handle:", resumptionHandle);
+    }
   }
 
   async connect(
@@ -65,8 +84,15 @@ export class GeminiLiveSession {
     targetLangLabel: string
   ): Promise<void> {
     try {
-      console.log("[Gemini] Connecting with primary model:", PRIMARY_MODEL, "target:", targetBcp47);
-      await this._connectWithModel(PRIMARY_MODEL, buildPrimaryConfig(targetBcp47));
+      console.log(
+        "[Gemini] Connecting with primary model:",
+        PRIMARY_MODEL,
+        `source: ${sourceLangLabel}, target: ${targetLangLabel} (${targetBcp47})`
+      );
+      await this._connectWithModel(
+        PRIMARY_MODEL,
+        buildPrimaryConfig(targetBcp47, sourceLangLabel, targetLangLabel)
+      );
       console.log("[Gemini] Connected with primary model:", PRIMARY_MODEL);
       this._connected = true;
     } catch (primaryErr) {
@@ -89,12 +115,26 @@ export class GeminiLiveSession {
     model: string,
     config: LiveConnectConfig
   ): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const extendedConfig: any = {
+      ...config,
+      contextWindowCompression: {
+        slidingWindow: {},
+      },
+    };
+    if (this._resumptionHandle) {
+      extendedConfig.sessionResumption = { handle: this._resumptionHandle };
+    } else {
+      extendedConfig.sessionResumption = {};
+    }
+
     const session = await this._ai.live.connect({
       model,
-      config,
+      config: extendedConfig,
       callbacks: {
         onopen: () => {
           console.log(`[Gemini Live WebSocket] Open for: ${model}`);
+          this._connected = true;
         },
         onmessage: (msg: LiveServerMessage) => {
           this._handleMessage(msg);
@@ -105,6 +145,13 @@ export class GeminiLiveSession {
         },
         onclose: (e: CloseEvent) => {
           console.log("[Gemini Live WebSocket] Closed code:", e.code, "reason:", e.reason);
+          this._connected = false;
+          this._session = null;
+          this._onClose?.(e.code, e.reason);
+          // If connection closed not intentionally (e.g. 1008 GoAway abort, idle timeout, network drop)
+          if (e.code !== 1000) {
+            this._onNeedReconnect?.();
+          }
         },
       },
     });
@@ -113,6 +160,27 @@ export class GeminiLiveSession {
   }
 
   private _handleMessage(msg: LiveServerMessage): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawMsg = msg as any;
+
+    // Check for GoAway signal (server warning 60s before connection expires)
+    if (rawMsg.goAway || rawMsg.go_away) {
+      console.warn("[Gemini Live] Received GoAway signal from server. Impending close.");
+      this._onGoAway?.();
+      this._onNeedReconnect?.();
+    }
+
+    // Capture session resumption handle for seamless context continuation
+    const handle =
+      rawMsg.sessionResumptionUpdate?.newHandle ||
+      rawMsg.session_resumption_update?.new_handle ||
+      rawMsg.sessionResumptionUpdate?.handle ||
+      rawMsg.session_resumption_update?.handle;
+    if (handle) {
+      this._resumptionHandle = handle;
+      console.log("[Gemini Live] Session resumption handle updated:", handle);
+    }
+
     // Check for interruption signal from server (Barge-in)
     if (msg.serverContent?.interrupted) {
       console.log("[Gemini Live] Server detected interruption / barge-in");
@@ -120,8 +188,7 @@ export class GeminiLiveSession {
     }
 
     // 1. Check for output transcription (Translated text stream from Gemini)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const serverContent = msg.serverContent as any;
+    const serverContent = rawMsg.serverContent;
     const outputText = serverContent?.outputTranscription?.text || serverContent?.output_transcription?.text;
     if (outputText) {
       console.log("[Gemini Live] Output transcript received:", outputText);
@@ -156,7 +223,8 @@ export class GeminiLiveSession {
   }
 
   sendAudioChunk(int16Buffer: ArrayBuffer): void {
-    if (!this._session) return;
+    // Error guard: Silently ignore chunks if socket is not connected to prevent console spam
+    if (!this._connected || !this._session) return;
     try {
       const base64 = arrayBufferToBase64(int16Buffer);
       // 'media' parameter correctly maps to 'mediaChunks' in Google Live API
@@ -166,9 +234,29 @@ export class GeminiLiveSession {
           mimeType: "audio/pcm;rate=16000",
         },
       });
-    } catch (err) {
-      console.warn("[Gemini] Failed to send audio chunk:", err);
+    } catch {
+      // Quietly ignore send errors during close/reconnect transitions
     }
+  }
+
+  getResumptionHandle(): string | null {
+    return this._resumptionHandle;
+  }
+
+  onNeedReconnect(cb: () => void): void {
+    this._onNeedReconnect = cb;
+  }
+
+  onGoAway(cb: () => void): void {
+    this._onGoAway = cb;
+  }
+
+  onClose(cb: (code: number, reason: string) => void): void {
+    this._onClose = cb;
+  }
+
+  isConnected(): boolean {
+    return this._connected && this._session !== null;
   }
 
   onAudioOutput(cb: (pcm: ArrayBuffer, sampleRate: number) => void): void {
@@ -200,9 +288,11 @@ export class GeminiLiveSession {
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
+  const CHUNK_SIZE = 0x2000; // 8192 bytes batch
   let binary = "";
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+    binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
   }
   return btoa(binary);
 }
