@@ -3,10 +3,17 @@ import {
   RoomEvent,
   Track,
   ConnectionState,
+  setLogLevel,
+  LogLevel,
   type RemoteTrack,
   type RemoteParticipant,
 } from "livekit-client";
 import type { UserProfileInfo } from "./room-store";
+
+// Silence verbose internal WebRTC stats and diagnostic logs in console
+if (typeof window !== "undefined") {
+  setLogLevel(LogLevel.warn);
+}
 
 export interface ChatMessagePayload {
   id: string;
