@@ -44,7 +44,7 @@ export function createTranslatedMediaStream(ctx: AudioContext): {
 } {
   const dest = ctx.createMediaStreamDestination();
   let nextPlayTime = 0;
-  const JITTER_BUFFER_SEC = 0.04; // 40ms lean jitter buffer for Google Meet-like low latency
+  const JITTER_BUFFER_SEC = 0.02; // 20ms ultra-low jitter buffer for immediate playback
   const activeSources = new Set<AudioBufferSourceNode>();
 
   function enqueue(buf: AudioBuffer) {

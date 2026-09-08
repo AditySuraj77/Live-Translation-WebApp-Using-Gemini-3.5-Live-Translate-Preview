@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState, useCallback, lazy, Suspense } from "react";
 import { findLanguage } from "@/lib/languages";
 import { GeminiLiveSession } from "@/lib/gemini-live";
-import { PeerManager, type ChatMessagePayload, type UserLocation } from "@/lib/webrtc";
+import { type ChatMessagePayload, type UserLocation } from "@/lib/webrtc";
+import { LiveKitPeerManager } from "@/lib/livekit-transport";
 import { pcmToAudioBuffer, createTranslatedMediaStream } from "@/lib/audio-utils";
 import { getStoredUserProfile, type UserProfile } from "@/lib/user-profile";
 import type { UserProfileInfo } from "@/lib/room-store";
@@ -125,7 +126,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const geminiRef = useRef<GeminiLiveSession | null>(null);
-  const peerRef = useRef<PeerManager | null>(null);
+  const peerRef = useRef<LiveKitPeerManager | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -387,31 +388,15 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           }
         };
 
-        // 7. WebRTC Setup: Load dynamic TURN & STUN ICE servers
-        let iceServers: RTCIceServer[] | undefined;
-        try {
-          const turnRes = await fetch("/api/turn-credentials");
-          if (turnRes.ok) {
-            const turnData = await turnRes.json();
-            if (turnData.iceServers && Array.isArray(turnData.iceServers)) {
-              iceServers = turnData.iceServers;
-            }
-          }
-        } catch (turnErr) {
-          console.warn("[Room] Could not load TURN credentials, fallback to default STUN:", turnErr);
-        }
-
-        const peer = new PeerManager(
+        // 7. Connect via LiveKit Cloud (Ultra-low latency Edge Audio Transport)
+        const peer = new LiveKitPeerManager(
           roomId,
           role,
-          myLangCode,
-          targetLangCode,
           {
             name: currentProfile.name,
             avatar: currentProfile.avatar,
             color: currentProfile.color,
-          },
-          iceServers
+          }
         );
         peerRef.current = peer;
 

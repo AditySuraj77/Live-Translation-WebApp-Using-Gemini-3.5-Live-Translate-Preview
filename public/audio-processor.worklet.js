@@ -9,7 +9,7 @@ class AudioProcessor extends AudioWorkletProcessor {
     super();
     this._buffer = [];
     this._targetSampleRate = 16000;
-    this._chunkSize = 640; // 40ms at 16kHz for ultra-low latency streaming
+    this._chunkSize = 320; // 20ms at 16kHz for ultra-low latency streaming
     this._resampleRatio = sampleRate / this._targetSampleRate;
     this._sourceIndex = 0;
     this._lastSample = 0;
