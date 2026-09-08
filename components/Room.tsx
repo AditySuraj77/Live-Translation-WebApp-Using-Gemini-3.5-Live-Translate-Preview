@@ -3,8 +3,7 @@
 import { useEffect, useRef, useState, useCallback, lazy, Suspense } from "react";
 import { findLanguage } from "@/lib/languages";
 import { GeminiLiveSession } from "@/lib/gemini-live";
-import { type ChatMessagePayload, type UserLocation } from "@/lib/webrtc";
-import { LiveKitPeerManager } from "@/lib/livekit-transport";
+import { LiveKitPeerManager, type ChatMessagePayload, type UserLocation } from "@/lib/livekit-transport";
 import { pcmToAudioBuffer, createTranslatedMediaStream } from "@/lib/audio-utils";
 import { getStoredUserProfile, type UserProfile } from "@/lib/user-profile";
 import type { UserProfileInfo } from "@/lib/room-store";
@@ -503,6 +502,11 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         if (!cancelled) {
           console.error("[Room] Setup error:", err);
           const rawMsg = err instanceof Error ? err.message : String(err);
+          if (rawMsg.toLowerCase().includes("full") || rawMsg.toLowerCase().includes("maximum 2")) {
+            setError("This room is already full (maximum 2 participants allowed).");
+            setStatus("room_full");
+            return;
+          }
           setError(rawMsg);
           setStatus("error");
 

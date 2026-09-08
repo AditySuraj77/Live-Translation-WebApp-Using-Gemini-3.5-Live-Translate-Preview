@@ -4,12 +4,6 @@ export interface UserProfileInfo {
   color?: string;
 }
 
-export interface SignalEvent {
-  type: "offer" | "answer" | "ice" | "room_full" | "profile" | "peer_left" | "peer_joined";
-  payload: unknown;
-  from: "caller" | "callee" | "system";
-}
-
 export interface RoomMetadata {
   id: string;
   name?: string;
@@ -22,7 +16,6 @@ export interface RoomMetadata {
 export interface RoomEntry {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   subscribers: Set<ReadableStreamDefaultController<any>>;
-  queue: SignalEvent[];
   metadata?: RoomMetadata;
   cleanupTimer?: NodeJS.Timeout;
 }
@@ -40,7 +33,7 @@ export const roomStore = globalThis.__liveRooms;
 
 export function getOrCreateRoom(roomId: string, metadata?: Partial<RoomMetadata>): RoomEntry {
   if (!roomStore.has(roomId)) {
-    roomStore.set(roomId, { subscribers: new Set(), queue: [] });
+    roomStore.set(roomId, { subscribers: new Set() });
   }
   const entry = roomStore.get(roomId)!;
   if (metadata) {
@@ -54,8 +47,4 @@ export function getOrCreateRoom(roomId: string, metadata?: Partial<RoomMetadata>
     };
   }
   return entry;
-}
-
-export function encodeSSE(event: SignalEvent | object): string {
-  return `data: ${JSON.stringify(event)}\n\n`;
 }

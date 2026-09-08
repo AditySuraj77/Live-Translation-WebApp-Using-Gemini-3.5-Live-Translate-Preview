@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
-import type { UserLocation } from "@/lib/webrtc";
+import type { UserLocation } from "@/lib/livekit-transport";
 import { calculateDistance, type DistanceResult } from "@/lib/geo-distance";
 
 interface ConnectionGlobeModalProps {

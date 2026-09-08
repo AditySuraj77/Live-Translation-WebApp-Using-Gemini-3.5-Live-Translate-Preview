@@ -7,7 +7,30 @@ import {
   type RemoteParticipant,
 } from "livekit-client";
 import type { UserProfileInfo } from "./room-store";
-import type { ChatMessagePayload, UserLocation } from "./webrtc";
+
+export interface ChatMessagePayload {
+  id: string;
+  sender: string;
+  senderAvatar: string;
+  senderColor?: string;
+  text?: string;
+  file?: {
+    name: string;
+    size: number;
+    type: string;
+    dataUrl: string;
+  };
+  timestamp: number;
+}
+
+export interface UserLocation {
+  city: string;
+  country: string;
+  countryCode: string;
+  flag: string;
+  lat: number;
+  lon: number;
+}
 
 export type Role = "caller" | "callee";
 
@@ -145,7 +168,17 @@ export class LiveKitPeerManager {
       );
 
       if (!res.ok) {
-        throw new Error(`LiveKit token request failed with status ${res.status}`);
+        let errData: { error?: string; code?: string } = {};
+        try {
+          errData = await res.json();
+        } catch {
+          /* ignore */
+        }
+        if (res.status === 403 || errData.code === "ROOM_FULL") {
+          this._onStatusChange?.("room_full");
+          throw new Error("This room is already full (maximum 2 participants allowed).");
+        }
+        throw new Error(errData.error || `LiveKit token request failed with status ${res.status}`);
       }
 
       const { token, wsUrl } = await res.json();

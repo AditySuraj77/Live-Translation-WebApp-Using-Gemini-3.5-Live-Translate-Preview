@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import type { ChatMessagePayload } from "@/lib/webrtc";
+import type { ChatMessagePayload } from "@/lib/livekit-transport";
 
 interface ChatSidebarProps {
   isOpen: boolean;
