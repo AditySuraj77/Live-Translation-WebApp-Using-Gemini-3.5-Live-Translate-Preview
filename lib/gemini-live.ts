@@ -32,7 +32,6 @@ function buildPrimaryConfig(
       echoTargetLanguage: false,
     },
     outputAudioTranscription: {},
-    inputAudioTranscription: {},
   };
 }
 
@@ -50,7 +49,6 @@ function buildFallbackConfig(
       ],
     },
     outputAudioTranscription: {},
-    inputAudioTranscription: {},
   };
 }
 
