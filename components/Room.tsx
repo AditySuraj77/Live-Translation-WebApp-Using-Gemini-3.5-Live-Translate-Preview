@@ -148,6 +148,8 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const micStreamRef = useRef<MediaStream | null>(null);
   const receivingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const nextAudioPlayTimeRef = useRef<number>(0);
+  const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const speechHangoverTimerRef = useRef<number>(0);
   const freshTokenRef = useRef<string | null>(null);
   const tokenRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isReconnectingGeminiRef = useRef(false);
@@ -195,7 +197,19 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     return () => window.removeEventListener("online", onOnline);
   }, [role]);
 
+  const stopAllActiveAudio = useCallback(() => {
+    activeSourcesRef.current.forEach((src) => {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch {}
+    });
+    activeSourcesRef.current.clear();
+    nextAudioPlayTimeRef.current = 0;
+  }, []);
+
   const cleanup = useCallback(() => {
+    stopAllActiveAudio();
     if (renderWsRef.current) {
       renderWsRef.current.close();
       renderWsRef.current = null;
@@ -219,7 +233,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     micSourceRef.current?.disconnect();
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     audioCtxRef.current?.close();
-  }, []);
+  }, [stopAllActiveAudio]);
 
   useEffect(() => {
     let cancelled = false;
@@ -386,11 +400,13 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           }
 
           const now = audioCtxRef.current.currentTime;
-          // Smooth back-to-back queue scheduling (25ms jitter buffer prevents clicking/popping)
-          if (nextAudioPlayTimeRef.current < now) {
+
+          // ZERO BACKLOG GUARANTEE: If accumulated audio backlog exceeds 700ms, DROP stale audio immediately!
+          if (nextAudioPlayTimeRef.current > now + 0.7) {
+            console.warn("[Room] Audio backlog exceeded 700ms! Dropping stale audio to stay strictly real-time.");
+            stopAllActiveAudio();
             nextAudioPlayTimeRef.current = now + 0.025;
-          } else if (nextAudioPlayTimeRef.current > now + 1.2) {
-            // Guard against unbounded queue lag (max 1.2s backlog)
+          } else if (nextAudioPlayTimeRef.current < now) {
             nextAudioPlayTimeRef.current = now + 0.025;
           }
 
@@ -398,8 +414,13 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           const src = audioCtxRef.current.createBufferSource();
           src.buffer = audioBuf;
           src.connect(audioCtxRef.current.destination);
-          src.start(startTime);
 
+          activeSourcesRef.current.add(src);
+          src.onended = () => {
+            activeSourcesRef.current.delete(src);
+          };
+
+          src.start(startTime);
           nextAudioPlayTimeRef.current = startTime + audioBuf.duration;
         };
 
@@ -428,6 +449,13 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
                 if (data.type === "ready") {
                   setGeminiConnected(true);
                   console.log("[Room] 🟢 Gemini Live translator ready:", data.model);
+                  return;
+                }
+
+                if (data.type === "clear_audio" || data.type === "interrupted") {
+                  stopAllActiveAudio();
+                  setPeerTranscript("");
+                  isPeerNewUtteranceRef.current = true;
                   return;
                 }
 
@@ -486,15 +514,6 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
                       setPeerTranscript("");
                     }, 2800);
                   }
-                } else if (data.type === "interrupted") {
-                  nextAudioPlayTimeRef.current = 0;
-                  if (data.from === role) {
-                    setLastTranscript("");
-                    isMyNewUtteranceRef.current = true;
-                  } else {
-                    setPeerTranscript("");
-                    isPeerNewUtteranceRef.current = true;
-                  }
                 } else if (data.type === "audio" && data.data) {
                   const pcm = base64ToArrayBuffer(data.data);
                   const mime = data.mimeType || "";
@@ -513,7 +532,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               console.log("[Room] Render Agent WebSocket closed");
               setIsDirectAgentActive(false);
               setGeminiConnected(false);
-              nextAudioPlayTimeRef.current = 0;
+              stopAllActiveAudio();
               if (!hasLeftRef.current && !cancelled) {
                 setTimeout(() => {
                   if (!hasLeftRef.current && !cancelled && (!renderWsRef.current || renderWsRef.current.readyState !== WebSocket.OPEN)) {
@@ -541,10 +560,13 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           if (evt.data?.type === "audio" && !mutedRef.current) {
             if (evt.data.isSpeech) {
               setIsSpeaking(true);
+              speechHangoverTimerRef.current = Date.now() + 450; // 450ms speech hangover
               if (!lastBroadcastedSpeech) {
                 lastBroadcastedSpeech = true;
                 isMyNewUtteranceRef.current = true;
                 peerRef.current?.sendSpeakingState(true);
+                // When I start speaking, cut off any incoming speaker audio from previous turns
+                stopAllActiveAudio();
               }
               if (speakTimer) clearTimeout(speakTimer);
               speakTimer = setTimeout(() => {
@@ -554,9 +576,12 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               }, 350);
             }
 
-            // ZERO DOUBLE-HOP: Stream exclusively to Render Direct Cloud Agent!
-            if (renderWsRef.current && renderWsRef.current.readyState === WebSocket.OPEN) {
-              renderWsRef.current.send(evt.data.buffer);
+            // VAD GATING: Only stream audio to Gemini when actively speaking or within 450ms trailing hangover!
+            // Stops flooding Gemini with 24/7 silence/noise packets!
+            if (Date.now() < speechHangoverTimerRef.current) {
+              if (renderWsRef.current && renderWsRef.current.readyState === WebSocket.OPEN) {
+                renderWsRef.current.send(evt.data.buffer);
+              }
             }
           }
         };
@@ -753,6 +778,11 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
 
     if (newMuted) {
       setIsSpeaking(false);
+      // Hard stop any ongoing playback from our speaker and tell server to drop old audio!
+      stopAllActiveAudio();
+      if (renderWsRef.current && renderWsRef.current.readyState === WebSocket.OPEN) {
+        renderWsRef.current.send(JSON.stringify({ type: "clear" }));
+      }
     }
 
     // Physically pause/resume mic stream at hardware/browser level

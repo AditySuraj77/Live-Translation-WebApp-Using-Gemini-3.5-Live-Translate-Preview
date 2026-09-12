@@ -194,7 +194,7 @@ wss.on("connection", async (ws, req) => {
       systemInstruction: {
         parts: [
           {
-            text: `You are an expert real-time simultaneous speech interpreter (like Google Meet Live Translate). The speaker is speaking in ${sourceLang}. Do NOT wait for full sentence completion. Immediately begin translating clause-by-clause or phrase-by-phrase in real-time as words are spoken into natural, fluent ${targetLang}. Start streaming translated audio on the very first meaningful clause. Speak only the clean translated speech in ${targetLang}. Maintain natural prosody and flow. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
+            text: `You are an expert real-time simultaneous speech interpreter (like Google Meet Live Translate). The speaker is speaking in ${sourceLang}. Immediately translate clause-by-clause in real-time as words are spoken into natural, fluent ${targetLang}. Speak only the clean translated speech in ${targetLang}. Maintain natural prosody and match the speaker's pace. Do NOT buffer or queue past speech. If the speaker pauses or stops, finish the current clause immediately and stop. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
           },
         ],
       },
@@ -224,7 +224,7 @@ wss.on("connection", async (ws, req) => {
               triggerSeamlessRollover("goaway");
             }
 
-            // C. Output transcription (subtitles) — deduplicated
+            // C. Output transcription (subtitles) — delivered to listener peer
             let captionEmitted = false;
             const outputText =
               rawMsg.serverContent?.outputTranscription?.text ||
@@ -232,7 +232,6 @@ wss.on("connection", async (ws, req) => {
             if (outputText) {
               captionEmitted = true;
               const captionPayload = JSON.stringify({ type: "caption", text: outputText, from: role });
-              if (ws.readyState === WebSocket.OPEN) ws.send(captionPayload);
               const currentRoom = rooms.get(roomId);
               const partner = currentRoom ? currentRoom[partnerKey] : null;
               if (partner && partner.ws.readyState === WebSocket.OPEN) {
@@ -434,6 +433,13 @@ wss.on("connection", async (ws, req) => {
           ws.send(JSON.stringify({ type: "pong", time: Date.now() }));
         } else if (msg.type === "pong") {
           // Client responded to our heartbeat
+        } else if (msg.type === "clear") {
+          peerState.audioQueue = [];
+          const currentRoom = rooms.get(roomId);
+          const partner = currentRoom ? currentRoom[partnerKey] : null;
+          if (partner && partner.ws.readyState === WebSocket.OPEN) {
+            partner.ws.send(JSON.stringify({ type: "clear_audio" }));
+          }
         }
       } catch {}
     }
