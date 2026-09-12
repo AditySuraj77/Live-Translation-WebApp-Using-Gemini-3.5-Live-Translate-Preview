@@ -419,9 +419,7 @@ wss.on("connection", async (ws, req) => {
 
   // Handle incoming audio from client
   ws.on("message", (data, isBinary) => {
-    const isBin = isBinary || Buffer.isBuffer(data) || data instanceof Uint8Array || data instanceof ArrayBuffer;
-
-    if (isBin) {
+    if (isBinary) {
       peerState.audioChunksReceived++;
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
       const base64 = buf.toString("base64");
