@@ -20,6 +20,18 @@ interface RoomProps {
   role: "caller" | "callee";
 }
 
+const RENDER_AGENT_URL =
+  process.env.NEXT_PUBLIC_RENDER_AGENT_URL || "https://live-translation-agent.onrender.com";
+
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
 interface FriendlyError {
   title: string;
   description: string;
@@ -136,6 +148,8 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const freshTokenRef = useRef<string | null>(null);
   const tokenRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isReconnectingGeminiRef = useRef(false);
+  const renderWsRef = useRef<WebSocket | null>(null);
+  const [isDirectAgentActive, setIsDirectAgentActive] = useState(false);
 
   // Load user profile & fetch user geolocation on mount & auto-retry on internet reconnect
   useEffect(() => {
@@ -179,6 +193,10 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   }, [role]);
 
   const cleanup = useCallback(() => {
+    if (renderWsRef.current) {
+      renderWsRef.current.close();
+      renderWsRef.current = null;
+    }
     if (tokenRefreshTimerRef.current) {
       clearTimeout(tokenRefreshTimerRef.current);
       tokenRefreshTimerRef.current = null;
@@ -363,7 +381,71 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           return;
         }
 
-        // 6. Route mic worklet chunks -> Gemini Live API & broadcast instant speech state
+        // Play audio directly through local speakers
+        const playIncomingPcm = (pcmBytes: ArrayBuffer, sampleRate: number) => {
+          if (!audioCtxRef.current) return;
+          setIsReceivingAudio(true);
+          if (receivingTimeoutRef.current) clearTimeout(receivingTimeoutRef.current);
+          receivingTimeoutRef.current = setTimeout(() => setIsReceivingAudio(false), 1200);
+
+          const audioBuf = pcmToAudioBuffer(audioCtxRef.current, pcmBytes, sampleRate);
+          if (audioCtxRef.current.state === "suspended") {
+            audioCtxRef.current.resume().catch(() => {});
+          }
+          const src = audioCtxRef.current.createBufferSource();
+          src.buffer = audioBuf;
+          src.connect(audioCtxRef.current.destination);
+          src.start();
+        };
+
+        // Connect to Render Direct Cloud Agent (Zero Double-Hop)
+        try {
+          const wsProto = RENDER_AGENT_URL.startsWith("https") ? "wss:" : "ws:";
+          const cleanHost = RENDER_AGENT_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
+          const streamWsUrl = `${wsProto}//${cleanHost}/live-stream?roomId=${encodeURIComponent(roomId)}&role=${encodeURIComponent(role)}&sourceLang=${encodeURIComponent(myLang.label)}&targetLang=${encodeURIComponent(targetLang.label)}&bcp47=${encodeURIComponent(targetLang.bcp47)}`;
+
+          console.log("[Room] Connecting to Render Direct Cloud Agent:", streamWsUrl);
+          const rWs = new WebSocket(streamWsUrl);
+          rWs.binaryType = "arraybuffer";
+          renderWsRef.current = rWs;
+
+          rWs.onopen = () => {
+            console.log("[Room] 🟢 Render Direct Cloud Pipeline connected (Zero U-Turn Active)!");
+            setIsDirectAgentActive(true);
+          };
+
+          rWs.onmessage = (evt) => {
+            try {
+              const data = JSON.parse(evt.data);
+              if (data.type === "caption" && data.text) {
+                if (data.from === role) {
+                  setLastTranscript((prev) => (prev ? `${prev} ${data.text}` : data.text).slice(-300));
+                } else {
+                  setPeerTranscript((prev) => (prev ? `${prev} ${data.text}` : data.text).slice(-300));
+                }
+              } else if (data.type === "audio" && data.data) {
+                const pcm = base64ToArrayBuffer(data.data);
+                const mime = data.mimeType || "";
+                const m = mime.match(/rate=(\d+)/);
+                const rate = m ? parseInt(m[1], 10) : 24000;
+                playIncomingPcm(pcm, rate);
+              }
+            } catch {}
+          };
+
+          rWs.onerror = (e) => {
+            console.warn("[Room] Render Agent WebSocket note:", e);
+          };
+
+          rWs.onclose = () => {
+            console.log("[Room] Render Agent WebSocket closed");
+            setIsDirectAgentActive(false);
+          };
+        } catch (e) {
+          console.warn("[Room] Could not open Render Agent WebSocket, using client fallback:", e);
+        }
+
+        // 6. Route mic worklet chunks -> Render Agent (Zero U-Turn) with Gemini fallback
         let speakTimer: NodeJS.Timeout | null = null;
         let lastBroadcastedSpeech = false;
 
@@ -383,7 +465,13 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               }, 350);
             }
 
-            geminiRef.current?.sendAudioChunk(evt.data.buffer);
+            // ZERO DOUBLE-HOP: If Render Agent WebSocket is connected, stream directly to Render!
+            if (renderWsRef.current && renderWsRef.current.readyState === WebSocket.OPEN) {
+              renderWsRef.current.send(evt.data.buffer);
+            } else {
+              // Fallback to client-side session if Render is offline
+              geminiRef.current?.sendAudioChunk(evt.data.buffer);
+            }
           }
         };
 
@@ -712,6 +800,12 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             <div className="flex flex-wrap sm:flex-nowrap justify-between items-center gap-2 pb-3 border-b border-gray-800">
               <span className="text-xs text-gray-400 font-medium">Session Status</span>
               <div className="flex items-center gap-2.5">
+                {isDirectAgentActive && (
+                  <span className="px-2 py-0.5 rounded-md bg-indigo-950/90 border border-indigo-500/40 text-indigo-300 font-mono text-[11px] font-semibold flex items-center gap-1 shadow-sm" title="Zero Double-Hop Cloud Translation Active">
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                    Direct Cloud Pipeline
+                  </span>
+                )}
                 {status === "connected" && (
                   <span className="px-2 py-0.5 rounded-md bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 font-mono text-xs font-semibold flex items-center gap-1.5 shadow-sm">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
