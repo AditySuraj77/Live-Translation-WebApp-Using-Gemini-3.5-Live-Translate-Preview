@@ -1,0 +1,13 @@
+{
+  "name": "live-translation-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "worker.mjs",
+  "scripts": {
+    "start": "node worker.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^2.17.1",
+    "livekit-server-sdk": "^2.18.0"
+  }
+}
