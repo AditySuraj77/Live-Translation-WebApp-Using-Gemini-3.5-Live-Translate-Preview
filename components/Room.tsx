@@ -147,6 +147,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const flushRef = useRef<(() => void) | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const receivingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const nextAudioPlayTimeRef = useRef<number>(0);
   const freshTokenRef = useRef<string | null>(null);
   const tokenRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isReconnectingGeminiRef = useRef(false);
@@ -372,7 +373,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         // Standby note: scheduleRollover() and client Gemini auto-connection disabled.
         // 100% of translation is now routed exclusively through Render Cloud Agent.
 
-        // Play audio directly through local speakers
+        // Smooth timeline scheduler for incoming PCM audio chunks (prevents clicking & overlapping)
         const playIncomingPcm = (pcmBytes: ArrayBuffer, sampleRate: number) => {
           if (!audioCtxRef.current) return;
           setIsReceivingAudio(true);
@@ -383,10 +384,23 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           if (audioCtxRef.current.state === "suspended") {
             audioCtxRef.current.resume().catch(() => {});
           }
+
+          const now = audioCtxRef.current.currentTime;
+          // Smooth back-to-back queue scheduling (25ms jitter buffer prevents clicking/popping)
+          if (nextAudioPlayTimeRef.current < now) {
+            nextAudioPlayTimeRef.current = now + 0.025;
+          } else if (nextAudioPlayTimeRef.current > now + 1.2) {
+            // Guard against unbounded queue lag (max 1.2s backlog)
+            nextAudioPlayTimeRef.current = now + 0.025;
+          }
+
+          const startTime = nextAudioPlayTimeRef.current;
           const src = audioCtxRef.current.createBufferSource();
           src.buffer = audioBuf;
           src.connect(audioCtxRef.current.destination);
-          src.start();
+          src.start(startTime);
+
+          nextAudioPlayTimeRef.current = startTime + audioBuf.duration;
         };
 
         // Connect to Render Direct Cloud Agent (Zero Double-Hop & Seamless Failover)
@@ -410,6 +424,13 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             rWs.onmessage = (evt) => {
               try {
                 const data = JSON.parse(evt.data);
+
+                if (data.type === "ready") {
+                  setGeminiConnected(true);
+                  console.log("[Room] 🟢 Gemini Live translator ready:", data.model);
+                  return;
+                }
+
                 if (data.type === "ping") {
                   if (rWs.readyState === WebSocket.OPEN) {
                     rWs.send(JSON.stringify({ type: "pong", time: Date.now() }));
@@ -451,6 +472,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
                     }, 3500);
                   }
                 } else if (data.type === "turn_complete") {
+                  nextAudioPlayTimeRef.current = 0;
                   if (data.from === role) {
                     isMyNewUtteranceRef.current = true;
                     if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
@@ -465,6 +487,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
                     }, 2800);
                   }
                 } else if (data.type === "interrupted") {
+                  nextAudioPlayTimeRef.current = 0;
                   if (data.from === role) {
                     setLastTranscript("");
                     isMyNewUtteranceRef.current = true;
@@ -489,6 +512,8 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             rWs.onclose = () => {
               console.log("[Room] Render Agent WebSocket closed");
               setIsDirectAgentActive(false);
+              setGeminiConnected(false);
+              nextAudioPlayTimeRef.current = 0;
               if (!hasLeftRef.current && !cancelled) {
                 setTimeout(() => {
                   if (!hasLeftRef.current && !cancelled && (!renderWsRef.current || renderWsRef.current.readyState !== WebSocket.OPEN)) {

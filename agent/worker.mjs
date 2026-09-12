@@ -203,10 +203,6 @@ wss.on("connection", async (ws, req) => {
         echoTargetLanguage: false,
       },
       outputAudioTranscription: {},
-      contextWindowCompression: {
-        slidingWindow: {},
-      },
-      sessionResumption: peerState.resumptionHandle ? { handle: peerState.resumptionHandle } : {},
     };
 
     let sessionInstance = null;
@@ -226,17 +222,6 @@ wss.on("connection", async (ws, req) => {
             if (rawMsg.goAway || rawMsg.go_away) {
               log(`[Gemini GoAway (${role})] Server sent GoAway warning. Triggering seamless key rollover...`);
               triggerSeamlessRollover("goaway");
-            }
-
-            // B. Capture session resumption handle for seamless continuous context
-            const handle =
-              rawMsg.sessionResumptionUpdate?.newHandle ||
-              rawMsg.session_resumption_update?.new_handle ||
-              rawMsg.sessionResumptionUpdate?.handle ||
-              rawMsg.session_resumption_update?.handle;
-            if (handle) {
-              peerState.resumptionHandle = handle;
-              log(`[Gemini Resumption (${role})] Context handle saved (${handle.slice(0, 16)}...)`);
             }
 
             // C. Output transcription (subtitles) — deduplicated
@@ -385,9 +370,9 @@ wss.on("connection", async (ws, req) => {
         triggerSeamlessRollover("proactive-8min");
       }, 8 * 60 * 1000); // 8 minutes
 
-      // Notify client on initial connect
-      if (!isRollover && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "ready", model: EXACT_MODEL }));
+      // Notify client that Gemini Live is ready
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ready", model: EXACT_MODEL, isRollover }));
       }
     } catch (gErr) {
       log(`[Gemini Connect Failed (${role})] ${gErr.message}`);
