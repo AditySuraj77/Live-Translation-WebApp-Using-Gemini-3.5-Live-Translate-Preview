@@ -4,8 +4,16 @@ import { GoogleGenAI } from "@google/genai";
 import { RoomServiceClient } from "livekit-server-sdk";
 
 // ─────────────────────────────────────────────────────────────
-// 0. Configuration & Environment
+// 0. Logging Buffer & Configuration
 // ─────────────────────────────────────────────────────────────
+const logBuffer = [];
+function log(...args) {
+  const line = `[${new Date().toISOString()}] ` + args.map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ");
+  console.log(line);
+  logBuffer.push(line);
+  if (logBuffer.length > 300) logBuffer.shift();
+}
+
 const PORT = process.env.PORT || 10000;
 const LIVEKIT_URL = process.env.LIVEKIT_URL || "";
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || "";
@@ -39,36 +47,35 @@ function getNextGeminiKey() {
   return k;
 }
 
-console.log("===============================================================");
-console.log("  LiveKit Cloud Direct Translation Agent Worker (Render.com)");
-console.log("===============================================================");
-console.log(`[Config] Target Model:   ${EXACT_MODEL}`);
-console.log(`[Config] LiveKit URL:    ${LIVEKIT_URL || "NOT SET"}`);
-console.log(`[Config] Gemini Key Pool: ${geminiKeys.length} active keys loaded`);
-console.log(`[Config] HTTP Port:      ${PORT}`);
+log("===============================================================");
+log("  LiveKit Cloud Direct Translation Agent Worker (Render.com)");
+log("===============================================================");
+log(`[Config] Target Model:   ${EXACT_MODEL}`);
+log(`[Config] LiveKit URL:    ${LIVEKIT_URL || "NOT SET"}`);
+log(`[Config] Gemini Key Pool: ${geminiKeys.length} active keys loaded`);
+log(`[Config] HTTP Port:      ${PORT}`);
 
 // ─────────────────────────────────────────────────────────────
-// 1. LiveKit Room Service Client (Optional Management)
+// 1. LiveKit Room Service Client
 // ─────────────────────────────────────────────────────────────
 let roomService = null;
 if (LIVEKIT_URL && LIVEKIT_API_KEY && LIVEKIT_API_SECRET) {
   try {
     const wsUrl = LIVEKIT_URL.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
     roomService = new RoomServiceClient(wsUrl, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
-    console.log("[LiveKit] RoomServiceClient initialized successfully");
+    log("[LiveKit] RoomServiceClient initialized successfully");
   } catch (err) {
-    console.error("[LiveKit Error] Failed to initialize RoomServiceClient:", err.message);
+    log("[LiveKit Error] Failed to initialize RoomServiceClient:", err.message);
   }
 }
 
 // ─────────────────────────────────────────────────────────────
 // 2. Active Rooms & Peer Connections State
 // ─────────────────────────────────────────────────────────────
-// rooms[roomId] = { caller: { ws, geminiSession, ... }, callee: { ws, geminiSession, ... } }
 const rooms = new Map();
 
 // ─────────────────────────────────────────────────────────────
-// 3. HTTP Server (Health Checks & Status)
+// 3. HTTP Server (Health Checks & Real-Time Logs)
 // ─────────────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
@@ -84,12 +91,19 @@ const server = http.createServer((req, res) => {
           configuredGeminiKeys: geminiKeys.length,
           activeRoomsCount: rooms.size,
           activeRoomIds: Array.from(rooms.keys()),
+          recentLogs: logBuffer.slice(-20),
           timestamp: new Date().toISOString(),
         },
         null,
         2
       )
     );
+    return;
+  }
+
+  if (req.url === "/logs") {
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(logBuffer.join("\n"));
     return;
   }
 
@@ -110,7 +124,7 @@ wss.on("connection", async (ws, req) => {
   const targetLang = url.searchParams.get("targetLang") || "English";
   const targetBcp47 = url.searchParams.get("bcp47") || "en";
 
-  console.log(`[WebSocket] Client connected: room=${roomId}, role=${role}, ${sourceLang} -> ${targetLang} (${targetBcp47})`);
+  log(`[WebSocket Connected] room=${roomId}, role=${role}, ${sourceLang} -> ${targetLang} (${targetBcp47})`);
 
   if (!rooms.has(roomId)) {
     rooms.set(roomId, { caller: null, callee: null });
@@ -119,12 +133,25 @@ wss.on("connection", async (ws, req) => {
   const peerKey = role === "caller" ? "caller" : "callee";
   const partnerKey = role === "caller" ? "callee" : "caller";
 
-  // Gemini Live Session for this speaker
-  let geminiSession = null;
-  const apiKey = getNextGeminiKey();
+  // Pre-register peer immediately to prevent race conditions
+  const peerState = {
+    ws,
+    geminiSession: null,
+    role,
+    sourceLang,
+    targetLang,
+    audioChunksReceived: 0,
+    audioChunksForwarded: 0,
+  };
+  room[peerKey] = peerState;
 
+  // Audio queue for early chunks before Gemini finishes handshake
+  const audioQueue = [];
+  let isGeminiReady = false;
+
+  const apiKey = getNextGeminiKey();
   if (!apiKey) {
-    console.error("[Agent Error] No Gemini API key available in pool!");
+    log(`[Agent Error] No Gemini API key available in pool for ${role}!`);
     ws.send(JSON.stringify({ type: "error", message: "No Gemini API key available on server" }));
     ws.close();
     return;
@@ -136,8 +163,8 @@ wss.on("connection", async (ws, req) => {
   });
 
   try {
-    console.log(`[Gemini] Initializing direct session for ${role} in room ${roomId}...`);
-    geminiSession = await ai.live.connect({
+    log(`[Gemini] Connecting session for ${role} in ${roomId} (key ending ${apiKey.slice(-6)})...`);
+    const session = await ai.live.connect({
       model: EXACT_MODEL,
       config: {
         responseModalities: ["AUDIO"],
@@ -153,11 +180,13 @@ wss.on("connection", async (ws, req) => {
           echoTargetLanguage: false,
         },
         outputAudioTranscription: {},
+        contextWindowCompression: {
+          slidingWindow: {},
+        },
       },
       callbacks: {
         onopen: () => {
-          console.log(`[Gemini Live] Session open for ${role} in ${roomId}`);
-          ws.send(JSON.stringify({ type: "ready", model: EXACT_MODEL }));
+          log(`[Gemini Live Socket Open] ${role} in ${roomId}`);
         },
         onmessage: (msg) => {
           const rawMsg = msg;
@@ -167,10 +196,11 @@ wss.on("connection", async (ws, req) => {
             rawMsg.serverContent?.outputTranscription?.text ||
             rawMsg.serverContent?.output_transcription?.text;
           if (outputText) {
+            log(`[Subtitle (${role})] ${outputText}`);
             const captionPayload = JSON.stringify({ type: "caption", text: outputText, from: role });
-            // Send to speaker (for self-captions) and to partner (for translated subtitles)
             if (ws.readyState === WebSocket.OPEN) ws.send(captionPayload);
-            const partner = room[partnerKey];
+            const currentRoom = rooms.get(roomId);
+            const partner = currentRoom ? currentRoom[partnerKey] : null;
             if (partner && partner.ws.readyState === WebSocket.OPEN) {
               partner.ws.send(captionPayload);
             }
@@ -178,6 +208,8 @@ wss.on("connection", async (ws, req) => {
 
           // 2. Translated Audio: FORWARD DIRECTLY TO THE OTHER PEER (ZERO U-TURN!)
           const parts = msg.serverContent?.modelTurn?.parts;
+          let audioEmitted = false;
+
           if (parts && Array.isArray(parts)) {
             for (const part of parts) {
               if (part.inlineData?.data) {
@@ -191,59 +223,113 @@ wss.on("connection", async (ws, req) => {
                 });
 
                 // DIRECT HOP: Send audio straight to the PARTNER's browser!
-                const partner = room[partnerKey];
+                const currentRoom = rooms.get(roomId);
+                const partner = currentRoom ? currentRoom[partnerKey] : null;
                 if (partner && partner.ws.readyState === WebSocket.OPEN) {
                   partner.ws.send(audioPayload);
+                  peerState.audioChunksForwarded++;
+                  audioEmitted = true;
+                } else {
+                  log(`[Forward Warn] Partner ${partnerKey} not available or socket closed!`);
                 }
               }
               if (part.text) {
                 const textPayload = JSON.stringify({ type: "caption", text: part.text, from: role });
                 if (ws.readyState === WebSocket.OPEN) ws.send(textPayload);
-                const partner = room[partnerKey];
+                const currentRoom = rooms.get(roomId);
+                const partner = currentRoom ? currentRoom[partnerKey] : null;
                 if (partner && partner.ws.readyState === WebSocket.OPEN) {
                   partner.ws.send(textPayload);
                 }
               }
             }
           }
+
+          // Fallback data property
+          if (!audioEmitted && msg.data) {
+            const currentRoom = rooms.get(roomId);
+            const partner = currentRoom ? currentRoom[partnerKey] : null;
+            if (partner && partner.ws.readyState === WebSocket.OPEN) {
+              partner.ws.send(
+                JSON.stringify({
+                  type: "audio",
+                  data: msg.data,
+                  mimeType: "audio/pcm;rate=24000",
+                  from: role,
+                })
+              );
+              peerState.audioChunksForwarded++;
+            }
+          }
         },
         onerror: (err) => {
-          console.error(`[Gemini Error (${role})]`, err);
+          log(`[Gemini Error (${role})] ${err?.message || err}`);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "gemini_error", error: String(err?.message || err) }));
+          }
         },
         onclose: (e) => {
-          console.log(`[Gemini Closed (${role})] code:`, e.code, "reason:", e.reason);
+          log(`[Gemini Closed (${role})] code: ${e.code}, reason: ${e.reason}`);
+          isGeminiReady = false;
         },
       },
     });
-  } catch (gErr) {
-    console.error(`[Gemini Connection Failed (${role})]`, gErr);
-  }
 
-  // Register peer in room
-  room[peerKey] = {
-    ws,
-    geminiSession,
-    role,
-    sourceLang,
-    targetLang,
-  };
+    peerState.geminiSession = session;
+    isGeminiReady = true;
+    log(`[Gemini Ready] Fully connected for ${role} in ${roomId}. Flushing queued chunks (${audioQueue.length})...`);
 
-  // Handle incoming audio from client
-  ws.on("message", (data, isBinary) => {
-    if (!geminiSession) return;
-
-    if (isBinary) {
-      // Direct raw binary PCM chunk from user's microphone (Float32 or Int16)
-      const base64 = Buffer.from(data).toString("base64");
+    // Flush any chunks queued before session resolved
+    while (audioQueue.length > 0) {
+      const qChunk = audioQueue.shift();
       try {
-        geminiSession.sendRealtimeInput({
+        session.sendRealtimeInput({
           media: {
-            data: base64,
+            data: qChunk,
             mimeType: "audio/pcm;rate=16000",
           },
         });
-      } catch (err) {
-        // Silently ignore transient frame drops
+      } catch (qErr) {
+        log(`[Queue Send Error] ${qErr.message}`);
+      }
+    }
+
+    // Now notify client that the agent worker is 100% ready for incoming audio
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "ready", model: EXACT_MODEL }));
+    }
+  } catch (gErr) {
+    log(`[Gemini Connection Failed (${role})] ${gErr.message}`);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "gemini_error", error: gErr.message }));
+    }
+  }
+
+  // Handle incoming audio from client
+  ws.on("message", (data, isBinary) => {
+    const isBin = isBinary || Buffer.isBuffer(data) || data instanceof Uint8Array || data instanceof ArrayBuffer;
+
+    if (isBin) {
+      peerState.audioChunksReceived++;
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      const base64 = buf.toString("base64");
+
+      if (isGeminiReady && peerState.geminiSession) {
+        try {
+          peerState.geminiSession.sendRealtimeInput({
+            media: {
+              data: base64,
+              mimeType: "audio/pcm;rate=16000",
+            },
+          });
+        } catch (err) {
+          log(`[Send Error (${role})] ${err.message}`);
+        }
+      } else {
+        // Queue if Gemini session is still connecting
+        if (audioQueue.length < 200) {
+          audioQueue.push(base64);
+        }
       }
     } else {
       // JSON control message
@@ -257,34 +343,34 @@ wss.on("connection", async (ws, req) => {
   });
 
   ws.on("close", () => {
-    console.log(`[WebSocket] Client disconnected: ${role} in room ${roomId}`);
-    if (geminiSession) {
+    log(`[WebSocket Disconnected] ${role} in ${roomId} (chunks in: ${peerState.audioChunksReceived}, forwarded: ${peerState.audioChunksForwarded})`);
+    if (peerState.geminiSession) {
       try {
-        geminiSession.close();
+        peerState.geminiSession.close();
       } catch {}
-      geminiSession = null;
+      peerState.geminiSession = null;
     }
     room[peerKey] = null;
     if (!room.caller && !room.callee) {
       rooms.delete(roomId);
-      console.log(`[Room Cleaned] Room ${roomId} is now empty and removed.`);
+      log(`[Room Cleaned] Room ${roomId} removed`);
     }
   });
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`[HTTP Server] Health check listening on http://0.0.0.0:${PORT}`);
-  console.log(`[WebSocket Server] Live stream listening on ws://0.0.0.0:${PORT}/live-stream`);
-  console.log("[Worker Status] DIRECT CLOUD PIPELINE ACTIVE (Zero Double-Hop) 🚀\n");
+  log(`[HTTP Server] Health listening on http://0.0.0.0:${PORT}`);
+  log(`[WebSocket Server] Live stream listening on ws://0.0.0.0:${PORT}/live-stream`);
+  log("[Worker Status] DIRECT CLOUD PIPELINE ACTIVE (Zero Double-Hop) 🚀\n");
 });
 
 // Graceful shutdown
 process.on("SIGTERM", () => {
-  console.log("[Worker] SIGTERM received. Shutting down gracefully...");
+  log("[Worker] SIGTERM received. Shutting down gracefully...");
   server.close(() => process.exit(0));
 });
 
 process.on("SIGINT", () => {
-  console.log("[Worker] SIGINT received. Shutting down gracefully...");
+  log("[Worker] SIGINT received. Shutting down gracefully...");
   server.close(() => process.exit(0));
 });

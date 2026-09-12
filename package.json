@@ -11,6 +11,7 @@
     "test:stress": "playwright test tests/stress-gemini-concurrency.spec.ts",
     "test:lifecycle": "playwright test tests/stress-1hour-lifecycle.spec.ts",
     "test:resilience": "playwright test tests/resilience-security-mobile.spec.ts",
+    "test:gemini-latency": "node tests/gemini-live-latency-benchmark-corrected.mjs",
     "test:all": "playwright test"
   },
   "dependencies": {
