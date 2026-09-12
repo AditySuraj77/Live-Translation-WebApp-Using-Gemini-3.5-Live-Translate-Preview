@@ -218,11 +218,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         setStatus("connecting");
         const currentProfile = getStoredUserProfile();
 
-        // 1. Fetch ephemeral auth token from server
-        const tokenRes = await fetch("/api/gemini-token");
-        if (!tokenRes.ok) throw new Error("Could not fetch Gemini authentication token from server");
-        const { token } = await tokenRes.json();
-
+        // 1. Client-side Gemini token fetch disabled (100% Render Cloud Agent mode)
         if (cancelled) return;
 
         // 2. Mic permission with echo cancellation and AGC disabled
@@ -363,23 +359,8 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             scheduleRollover();
           }, 24 * 60 * 1000);
         };
-        scheduleRollover();
-
-        const gemini = new GeminiLiveSession(token);
-        geminiRef.current = gemini;
-        attachGeminiEvents(gemini);
-
-        try {
-          await gemini.connect(targetLang.bcp47, myLang.label, targetLang.label);
-          setGeminiConnected(true);
-        } catch (gErr) {
-          console.warn("[Room] Gemini connection initial issue:", gErr);
-        }
-
-        if (cancelled) {
-          gemini.disconnect();
-          return;
-        }
+        // Standby note: scheduleRollover() and client Gemini auto-connection disabled.
+        // 100% of translation is now routed exclusively through Render Cloud Agent.
 
         // Play audio directly through local speakers
         const playIncomingPcm = (pcmBytes: ArrayBuffer, sampleRate: number) => {
@@ -465,12 +446,9 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               }, 350);
             }
 
-            // ZERO DOUBLE-HOP: If Render Agent WebSocket is connected, stream directly to Render!
+            // ZERO DOUBLE-HOP: Stream exclusively to Render Direct Cloud Agent!
             if (renderWsRef.current && renderWsRef.current.readyState === WebSocket.OPEN) {
               renderWsRef.current.send(evt.data.buffer);
-            } else {
-              // Fallback to client-side session if Render is offline
-              geminiRef.current?.sendAudioChunk(evt.data.buffer);
             }
           }
         };
@@ -800,10 +778,15 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             <div className="flex flex-wrap sm:flex-nowrap justify-between items-center gap-2 pb-3 border-b border-gray-800">
               <span className="text-xs text-gray-400 font-medium">Session Status</span>
               <div className="flex items-center gap-2.5">
-                {isDirectAgentActive && (
+                {isDirectAgentActive ? (
                   <span className="px-2 py-0.5 rounded-md bg-indigo-950/90 border border-indigo-500/40 text-indigo-300 font-mono text-[11px] font-semibold flex items-center gap-1 shadow-sm" title="Zero Double-Hop Cloud Translation Active">
                     <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-                    Direct Cloud Pipeline
+                    Direct Cloud Pipeline (Render)
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-md bg-amber-950/90 border border-amber-500/40 text-amber-300 font-mono text-[11px] font-semibold flex items-center gap-1 shadow-sm" title="Connecting to Render Agent Worker">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    Connecting Cloud Agent…
                   </span>
                 )}
                 {status === "connected" && (
