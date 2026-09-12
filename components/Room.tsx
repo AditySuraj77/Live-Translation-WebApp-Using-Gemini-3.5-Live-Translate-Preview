@@ -389,101 +389,124 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           src.start();
         };
 
-        // Connect to Render Direct Cloud Agent (Zero Double-Hop)
-        try {
-          const wsProto = RENDER_AGENT_URL.startsWith("https") ? "wss:" : "ws:";
-          const cleanHost = RENDER_AGENT_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
-          const streamWsUrl = `${wsProto}//${cleanHost}/live-stream?roomId=${encodeURIComponent(roomId)}&role=${encodeURIComponent(role)}&sourceLang=${encodeURIComponent(myLang.label)}&targetLang=${encodeURIComponent(targetLang.label)}&bcp47=${encodeURIComponent(targetLang.bcp47)}`;
+        // Connect to Render Direct Cloud Agent (Zero Double-Hop & Seamless Failover)
+        const connectRenderAgent = () => {
+          if (hasLeftRef.current || cancelled) return;
+          try {
+            const wsProto = RENDER_AGENT_URL.startsWith("https") ? "wss:" : "ws:";
+            const cleanHost = RENDER_AGENT_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
+            const streamWsUrl = `${wsProto}//${cleanHost}/live-stream?roomId=${encodeURIComponent(roomId)}&role=${encodeURIComponent(role)}&sourceLang=${encodeURIComponent(myLang.label)}&targetLang=${encodeURIComponent(targetLang.label)}&bcp47=${encodeURIComponent(targetLang.bcp47)}`;
 
-          console.log("[Room] Connecting to Render Direct Cloud Agent:", streamWsUrl);
-          const rWs = new WebSocket(streamWsUrl);
-          rWs.binaryType = "arraybuffer";
-          renderWsRef.current = rWs;
+            console.log("[Room] Connecting to Render Direct Cloud Agent:", streamWsUrl);
+            const rWs = new WebSocket(streamWsUrl);
+            rWs.binaryType = "arraybuffer";
+            renderWsRef.current = rWs;
 
-          rWs.onopen = () => {
-            console.log("[Room] 🟢 Render Direct Cloud Pipeline connected (Zero U-Turn Active)!");
-            setIsDirectAgentActive(true);
-          };
+            rWs.onopen = () => {
+              console.log("[Room] 🟢 Render Direct Cloud Pipeline connected (Zero U-Turn Active)!");
+              setIsDirectAgentActive(true);
+            };
 
-          rWs.onmessage = (evt) => {
-            try {
-              const data = JSON.parse(evt.data);
-              if (data.type === "caption" && data.text) {
-                const cleanText = data.text.trim();
-                if (!cleanText) return;
+            rWs.onmessage = (evt) => {
+              try {
+                const data = JSON.parse(evt.data);
+                if (data.type === "ping") {
+                  if (rWs.readyState === WebSocket.OPEN) {
+                    rWs.send(JSON.stringify({ type: "pong", time: Date.now() }));
+                  }
+                  return;
+                }
 
-                if (data.from === role) {
-                  setLastTranscript((prev) => {
-                    if (!prev || isMyNewUtteranceRef.current) {
-                      isMyNewUtteranceRef.current = false;
-                      return cleanText;
-                    }
-                    return `${prev} ${cleanText}`.slice(-130);
-                  });
+                if (data.type === "caption" && data.text) {
+                  const cleanText = data.text.trim();
+                  if (!cleanText) return;
 
-                  if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
-                  myTranscriptTimerRef.current = setTimeout(() => {
+                  if (data.from === role) {
+                    setLastTranscript((prev) => {
+                      if (!prev || isMyNewUtteranceRef.current) {
+                        isMyNewUtteranceRef.current = false;
+                        return cleanText;
+                      }
+                      return `${prev} ${cleanText}`.slice(-130);
+                    });
+
+                    if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
+                    myTranscriptTimerRef.current = setTimeout(() => {
+                      setLastTranscript("");
+                      isMyNewUtteranceRef.current = true;
+                    }, 3500);
+                  } else {
+                    setPeerTranscript((prev) => {
+                      if (!prev || isPeerNewUtteranceRef.current) {
+                        isPeerNewUtteranceRef.current = false;
+                        return cleanText;
+                      }
+                      return `${prev} ${cleanText}`.slice(-130);
+                    });
+
+                    if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
+                    peerTranscriptTimerRef.current = setTimeout(() => {
+                      setPeerTranscript("");
+                      isPeerNewUtteranceRef.current = true;
+                    }, 3500);
+                  }
+                } else if (data.type === "turn_complete") {
+                  if (data.from === role) {
+                    isMyNewUtteranceRef.current = true;
+                    if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
+                    myTranscriptTimerRef.current = setTimeout(() => {
+                      setLastTranscript("");
+                    }, 2800);
+                  } else {
+                    isPeerNewUtteranceRef.current = true;
+                    if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
+                    peerTranscriptTimerRef.current = setTimeout(() => {
+                      setPeerTranscript("");
+                    }, 2800);
+                  }
+                } else if (data.type === "interrupted") {
+                  if (data.from === role) {
                     setLastTranscript("");
                     isMyNewUtteranceRef.current = true;
-                  }, 3500);
-                } else {
-                  setPeerTranscript((prev) => {
-                    if (!prev || isPeerNewUtteranceRef.current) {
-                      isPeerNewUtteranceRef.current = false;
-                      return cleanText;
-                    }
-                    return `${prev} ${cleanText}`.slice(-130);
-                  });
-
-                  if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
-                  peerTranscriptTimerRef.current = setTimeout(() => {
+                  } else {
                     setPeerTranscript("");
                     isPeerNewUtteranceRef.current = true;
-                  }, 3500);
+                  }
+                } else if (data.type === "audio" && data.data) {
+                  const pcm = base64ToArrayBuffer(data.data);
+                  const mime = data.mimeType || "";
+                  const m = mime.match(/rate=(\d+)/);
+                  const rate = m ? parseInt(m[1], 10) : 24000;
+                  playIncomingPcm(pcm, rate);
                 }
-              } else if (data.type === "turn_complete") {
-                if (data.from === role) {
-                  isMyNewUtteranceRef.current = true;
-                  if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
-                  myTranscriptTimerRef.current = setTimeout(() => {
-                    setLastTranscript("");
-                  }, 2800);
-                } else {
-                  isPeerNewUtteranceRef.current = true;
-                  if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
-                  peerTranscriptTimerRef.current = setTimeout(() => {
-                    setPeerTranscript("");
-                  }, 2800);
-                }
-              } else if (data.type === "interrupted") {
-                if (data.from === role) {
-                  setLastTranscript("");
-                  isMyNewUtteranceRef.current = true;
-                } else {
-                  setPeerTranscript("");
-                  isPeerNewUtteranceRef.current = true;
-                }
-              } else if (data.type === "audio" && data.data) {
-                const pcm = base64ToArrayBuffer(data.data);
-                const mime = data.mimeType || "";
-                const m = mime.match(/rate=(\d+)/);
-                const rate = m ? parseInt(m[1], 10) : 24000;
-                playIncomingPcm(pcm, rate);
+              } catch {}
+            };
+
+            rWs.onerror = (e) => {
+              console.warn("[Room] Render Agent WebSocket note:", e);
+            };
+
+            rWs.onclose = () => {
+              console.log("[Room] Render Agent WebSocket closed");
+              setIsDirectAgentActive(false);
+              if (!hasLeftRef.current && !cancelled) {
+                setTimeout(() => {
+                  if (!hasLeftRef.current && !cancelled && (!renderWsRef.current || renderWsRef.current.readyState !== WebSocket.OPEN)) {
+                    console.log("[Room] Auto-reconnecting to Render Agent...");
+                    connectRenderAgent();
+                  }
+                }, 1500);
               }
-            } catch {}
-          };
+            };
+          } catch (e) {
+            console.warn("[Room] Could not open Render Agent WebSocket, retrying in 2s:", e);
+            if (!hasLeftRef.current && !cancelled) {
+              setTimeout(connectRenderAgent, 2000);
+            }
+          }
+        };
 
-          rWs.onerror = (e) => {
-            console.warn("[Room] Render Agent WebSocket note:", e);
-          };
-
-          rWs.onclose = () => {
-            console.log("[Room] Render Agent WebSocket closed");
-            setIsDirectAgentActive(false);
-          };
-        } catch (e) {
-          console.warn("[Room] Could not open Render Agent WebSocket, using client fallback:", e);
-        }
+        connectRenderAgent();
 
         // 6. Route mic worklet chunks -> Render Agent (Zero U-Turn) with Gemini fallback
         let speakTimer: NodeJS.Timeout | null = null;

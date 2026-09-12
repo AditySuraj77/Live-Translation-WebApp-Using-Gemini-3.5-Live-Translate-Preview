@@ -11,7 +11,7 @@ function log(...args) {
   const line = `[${new Date().toISOString()}] ` + args.map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ");
   console.log(line);
   logBuffer.push(line);
-  if (logBuffer.length > 300) logBuffer.shift();
+  if (logBuffer.length > 400) logBuffer.shift();
 }
 
 const PORT = process.env.PORT || 10000;
@@ -41,10 +41,11 @@ for (const [key, val] of Object.entries(process.env)) {
 
 let keyPointer = 0;
 function getNextGeminiKey() {
-  if (geminiKeys.length === 0) return "";
-  const k = geminiKeys[keyPointer % geminiKeys.length];
+  if (geminiKeys.length === 0) return { key: "", index: -1 };
+  const idx = keyPointer % geminiKeys.length;
+  const k = geminiKeys[idx];
   keyPointer++;
-  return k;
+  return { key: k, index: idx };
 }
 
 log("===============================================================");
@@ -91,7 +92,7 @@ const server = http.createServer((req, res) => {
           configuredGeminiKeys: geminiKeys.length,
           activeRoomsCount: rooms.size,
           activeRoomIds: Array.from(rooms.keys()),
-          recentLogs: logBuffer.slice(-20),
+          recentLogs: logBuffer.slice(-25),
           timestamp: new Date().toISOString(),
         },
         null,
@@ -138,195 +139,283 @@ wss.on("connection", async (ws, req) => {
     ws,
     geminiSession: null,
     role,
+    roomId,
     sourceLang,
     targetLang,
+    targetBcp47,
+    partnerKey,
     audioChunksReceived: 0,
     audioChunksForwarded: 0,
+    resumptionHandle: null,
+    rolloverTimer: null,
+    isRolloverInProgress: false,
+    reconnectTimer: null,
+    isDestroyed: false,
+    audioQueue: [],
+    isGeminiReady: false,
+    activeKeyIndex: -1,
   };
   room[peerKey] = peerState;
 
-  // Audio queue for early chunks before Gemini finishes handshake
-  const audioQueue = [];
-  let isGeminiReady = false;
+  // Heartbeat ping interval to prevent proxy idle dropouts
+  const heartbeatTimer = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: "ping", time: Date.now() }));
+      } catch {}
+    }
+  }, 20000);
 
-  const apiKey = getNextGeminiKey();
-  if (!apiKey) {
-    log(`[Agent Error] No Gemini API key available in pool for ${role}!`);
-    ws.send(JSON.stringify({ type: "error", message: "No Gemini API key available on server" }));
-    ws.close();
-    return;
-  }
+  // ─────────────────────────────────────────────────────────────
+  // 5. Seamless Gemini Session Lifecycle & Round-Robin Key Rollover
+  // ─────────────────────────────────────────────────────────────
+  async function connectGemini(isRollover = false) {
+    if (peerState.isDestroyed || ws.readyState !== WebSocket.OPEN) return;
 
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: { apiVersion: "v1alpha" },
-  });
+    const { key: apiKey, index: keyIdx } = getNextGeminiKey();
+    if (!apiKey) {
+      log(`[Agent Error] No Gemini API key available in pool for ${role}!`);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "error", message: "No Gemini API key available on server" }));
+      }
+      return;
+    }
 
-  try {
-    log(`[Gemini] Connecting session for ${role} in ${roomId} (key ending ${apiKey.slice(-6)})...`);
-    const session = await ai.live.connect({
-      model: EXACT_MODEL,
-      config: {
-        responseModalities: ["AUDIO"],
-        systemInstruction: {
-          parts: [
-            {
-              text: `You are an expert real-time simultaneous speech interpreter (like Google Meet Live Translate). The speaker is speaking in ${sourceLang}. Do NOT wait for full sentence completion. Immediately begin translating clause-by-clause or phrase-by-phrase in real-time as words are spoken into natural, fluent ${targetLang}. Start streaming translated audio on the very first meaningful clause. Speak only the clean translated speech in ${targetLang}. Maintain natural prosody and flow. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
-            },
-          ],
-        },
-        translationConfig: {
-          targetLanguageCode: targetBcp47,
-          echoTargetLanguage: false,
-        },
-        outputAudioTranscription: {},
-        contextWindowCompression: {
-          slidingWindow: {},
-        },
-      },
-      callbacks: {
-        onopen: () => {
-          log(`[Gemini Live Socket Open] ${role} in ${roomId}`);
-        },
-        onmessage: (msg) => {
-          const rawMsg = msg;
+    peerState.activeKeyIndex = keyIdx;
+    log(`[Gemini Pool] ${isRollover ? "Rollover" : "Connect"} for ${role} in ${roomId} using Key #${keyIdx + 1}/${geminiKeys.length} (ending in ${apiKey.slice(-6)})...`);
 
-          // 1. Output transcription (subtitles)
-          let captionEmitted = false;
-          const outputText =
-            rawMsg.serverContent?.outputTranscription?.text ||
-            rawMsg.serverContent?.output_transcription?.text;
-          if (outputText) {
-            log(`[Subtitle (${role})] ${outputText}`);
-            captionEmitted = true;
-            const captionPayload = JSON.stringify({ type: "caption", text: outputText, from: role });
-            if (ws.readyState === WebSocket.OPEN) ws.send(captionPayload);
-            const currentRoom = rooms.get(roomId);
-            const partner = currentRoom ? currentRoom[partnerKey] : null;
-            if (partner && partner.ws.readyState === WebSocket.OPEN) {
-              partner.ws.send(captionPayload);
-            }
-          }
-
-          // 2. Translated Audio: FORWARD DIRECTLY TO THE OTHER PEER (ZERO U-TURN!)
-          const parts = msg.serverContent?.modelTurn?.parts;
-          let audioEmitted = false;
-
-          if (parts && Array.isArray(parts)) {
-            for (const part of parts) {
-              if (part.inlineData?.data) {
-                const base64Audio = part.inlineData.data;
-                const mimeType = part.inlineData.mimeType || "audio/pcm;rate=24000";
-                const audioPayload = JSON.stringify({
-                  type: "audio",
-                  data: base64Audio,
-                  mimeType,
-                  from: role,
-                });
-
-                // DIRECT HOP: Send audio straight to the PARTNER's browser!
-                const currentRoom = rooms.get(roomId);
-                const partner = currentRoom ? currentRoom[partnerKey] : null;
-                if (partner && partner.ws.readyState === WebSocket.OPEN) {
-                  partner.ws.send(audioPayload);
-                  peerState.audioChunksForwarded++;
-                  audioEmitted = true;
-                } else {
-                  log(`[Forward Warn] Partner ${partnerKey} not available or socket closed!`);
-                }
-              }
-              if (part.text && !captionEmitted) {
-                const textPayload = JSON.stringify({ type: "caption", text: part.text, from: role });
-                if (ws.readyState === WebSocket.OPEN) ws.send(textPayload);
-                const currentRoom = rooms.get(roomId);
-                const partner = currentRoom ? currentRoom[partnerKey] : null;
-                if (partner && partner.ws.readyState === WebSocket.OPEN) {
-                  partner.ws.send(textPayload);
-                }
-              }
-            }
-          }
-
-          // 3. Turn complete & interruption signals (resets subtitle accumulation cleanly)
-          if (rawMsg.serverContent?.turnComplete) {
-            const turnPayload = JSON.stringify({ type: "turn_complete", from: role });
-            if (ws.readyState === WebSocket.OPEN) ws.send(turnPayload);
-            const currentRoom = rooms.get(roomId);
-            const partner = currentRoom ? currentRoom[partnerKey] : null;
-            if (partner && partner.ws.readyState === WebSocket.OPEN) {
-              partner.ws.send(turnPayload);
-            }
-          }
-
-          if (rawMsg.serverContent?.interrupted) {
-            const interruptedPayload = JSON.stringify({ type: "interrupted", from: role });
-            if (ws.readyState === WebSocket.OPEN) ws.send(interruptedPayload);
-            const currentRoom = rooms.get(roomId);
-            const partner = currentRoom ? currentRoom[partnerKey] : null;
-            if (partner && partner.ws.readyState === WebSocket.OPEN) {
-              partner.ws.send(interruptedPayload);
-            }
-          }
-
-          // Fallback data property
-          if (!audioEmitted && msg.data) {
-            const currentRoom = rooms.get(roomId);
-            const partner = currentRoom ? currentRoom[partnerKey] : null;
-            if (partner && partner.ws.readyState === WebSocket.OPEN) {
-              partner.ws.send(
-                JSON.stringify({
-                  type: "audio",
-                  data: msg.data,
-                  mimeType: "audio/pcm;rate=24000",
-                  from: role,
-                })
-              );
-              peerState.audioChunksForwarded++;
-            }
-          }
-        },
-        onerror: (err) => {
-          log(`[Gemini Error (${role})] ${err?.message || err}`);
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "gemini_error", error: String(err?.message || err) }));
-          }
-        },
-        onclose: (e) => {
-          log(`[Gemini Closed (${role})] code: ${e.code}, reason: ${e.reason}`);
-          isGeminiReady = false;
-        },
-      },
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { apiVersion: "v1alpha" },
     });
 
-    peerState.geminiSession = session;
-    isGeminiReady = true;
-    log(`[Gemini Ready] Fully connected for ${role} in ${roomId}. Flushing queued chunks (${audioQueue.length})...`);
-
-    // Flush any chunks queued before session resolved
-    while (audioQueue.length > 0) {
-      const qChunk = audioQueue.shift();
-      try {
-        session.sendRealtimeInput({
-          media: {
-            data: qChunk,
-            mimeType: "audio/pcm;rate=16000",
+    const connectConfig = {
+      responseModalities: ["AUDIO"],
+      systemInstruction: {
+        parts: [
+          {
+            text: `You are an expert real-time simultaneous speech interpreter (like Google Meet Live Translate). The speaker is speaking in ${sourceLang}. Do NOT wait for full sentence completion. Immediately begin translating clause-by-clause or phrase-by-phrase in real-time as words are spoken into natural, fluent ${targetLang}. Start streaming translated audio on the very first meaningful clause. Speak only the clean translated speech in ${targetLang}. Maintain natural prosody and flow. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
           },
-        });
-      } catch (qErr) {
-        log(`[Queue Send Error] ${qErr.message}`);
+        ],
+      },
+      translationConfig: {
+        targetLanguageCode: targetBcp47,
+        echoTargetLanguage: false,
+      },
+      outputAudioTranscription: {},
+      contextWindowCompression: {
+        slidingWindow: {},
+      },
+      sessionResumption: peerState.resumptionHandle ? { handle: peerState.resumptionHandle } : {},
+    };
+
+    let sessionInstance = null;
+
+    try {
+      sessionInstance = await ai.live.connect({
+        model: EXACT_MODEL,
+        config: connectConfig,
+        callbacks: {
+          onopen: () => {
+            log(`[Gemini Live Socket Open] ${role} in ${roomId} (Key #${keyIdx + 1})`);
+          },
+          onmessage: (msg) => {
+            const rawMsg = msg;
+
+            // A. Check for Google's GoAway signal (sent ~60s before 10-minute maximum session cutoff)
+            if (rawMsg.goAway || rawMsg.go_away) {
+              log(`[Gemini GoAway (${role})] Server sent GoAway warning. Triggering seamless key rollover...`);
+              triggerSeamlessRollover("goaway");
+            }
+
+            // B. Capture session resumption handle for seamless continuous context
+            const handle =
+              rawMsg.sessionResumptionUpdate?.newHandle ||
+              rawMsg.session_resumption_update?.new_handle ||
+              rawMsg.sessionResumptionUpdate?.handle ||
+              rawMsg.session_resumption_update?.handle;
+            if (handle) {
+              peerState.resumptionHandle = handle;
+              log(`[Gemini Resumption (${role})] Context handle saved (${handle.slice(0, 16)}...)`);
+            }
+
+            // C. Output transcription (subtitles) — deduplicated
+            let captionEmitted = false;
+            const outputText =
+              rawMsg.serverContent?.outputTranscription?.text ||
+              rawMsg.serverContent?.output_transcription?.text;
+            if (outputText) {
+              captionEmitted = true;
+              const captionPayload = JSON.stringify({ type: "caption", text: outputText, from: role });
+              if (ws.readyState === WebSocket.OPEN) ws.send(captionPayload);
+              const currentRoom = rooms.get(roomId);
+              const partner = currentRoom ? currentRoom[partnerKey] : null;
+              if (partner && partner.ws.readyState === WebSocket.OPEN) {
+                partner.ws.send(captionPayload);
+              }
+            }
+
+            // D. Translated Audio: FORWARD DIRECTLY TO THE OTHER PEER (ZERO U-TURN!)
+            const parts = msg.serverContent?.modelTurn?.parts;
+            let audioEmitted = false;
+
+            if (parts && Array.isArray(parts)) {
+              for (const part of parts) {
+                if (part.inlineData?.data) {
+                  const base64Audio = part.inlineData.data;
+                  const mimeType = part.inlineData.mimeType || "audio/pcm;rate=24000";
+                  const audioPayload = JSON.stringify({
+                    type: "audio",
+                    data: base64Audio,
+                    mimeType,
+                    from: role,
+                  });
+
+                  // DIRECT HOP: Send audio straight to the PARTNER's browser!
+                  const currentRoom = rooms.get(roomId);
+                  const partner = currentRoom ? currentRoom[partnerKey] : null;
+                  if (partner && partner.ws.readyState === WebSocket.OPEN) {
+                    partner.ws.send(audioPayload);
+                    peerState.audioChunksForwarded++;
+                    audioEmitted = true;
+                  }
+                }
+                if (part.text && !captionEmitted) {
+                  const textPayload = JSON.stringify({ type: "caption", text: part.text, from: role });
+                  if (ws.readyState === WebSocket.OPEN) ws.send(textPayload);
+                  const currentRoom = rooms.get(roomId);
+                  const partner = currentRoom ? currentRoom[partnerKey] : null;
+                  if (partner && partner.ws.readyState === WebSocket.OPEN) {
+                    partner.ws.send(textPayload);
+                  }
+                }
+              }
+            }
+
+            // E. Turn complete & interruption signals (resets subtitle accumulation cleanly)
+            if (rawMsg.serverContent?.turnComplete) {
+              const turnPayload = JSON.stringify({ type: "turn_complete", from: role });
+              if (ws.readyState === WebSocket.OPEN) ws.send(turnPayload);
+              const currentRoom = rooms.get(roomId);
+              const partner = currentRoom ? currentRoom[partnerKey] : null;
+              if (partner && partner.ws.readyState === WebSocket.OPEN) {
+                partner.ws.send(turnPayload);
+              }
+            }
+
+            if (rawMsg.serverContent?.interrupted) {
+              const interruptedPayload = JSON.stringify({ type: "interrupted", from: role });
+              if (ws.readyState === WebSocket.OPEN) ws.send(interruptedPayload);
+              const currentRoom = rooms.get(roomId);
+              const partner = currentRoom ? currentRoom[partnerKey] : null;
+              if (partner && partner.ws.readyState === WebSocket.OPEN) {
+                partner.ws.send(interruptedPayload);
+              }
+            }
+
+            // Fallback data property
+            if (!audioEmitted && msg.data) {
+              const currentRoom = rooms.get(roomId);
+              const partner = currentRoom ? currentRoom[partnerKey] : null;
+              if (partner && partner.ws.readyState === WebSocket.OPEN) {
+                partner.ws.send(
+                  JSON.stringify({
+                    type: "audio",
+                    data: msg.data,
+                    mimeType: "audio/pcm;rate=24000",
+                    from: role,
+                  })
+                );
+                peerState.audioChunksForwarded++;
+              }
+            }
+          },
+          onerror: (err) => {
+            log(`[Gemini Error (${role})] ${err?.message || err}`);
+          },
+          onclose: (e) => {
+            log(`[Gemini Closed (${role})] code: ${e.code}, reason: ${e.reason}`);
+            // If the active session closed and we're not shutting down, auto-failover immediately
+            if (!peerState.isDestroyed && ws.readyState === WebSocket.OPEN) {
+              if (peerState.geminiSession === sessionInstance) {
+                peerState.isGeminiReady = false;
+                peerState.geminiSession = null;
+                log(`[Gemini Auto-Failover (${role})] Active session terminated. Failing over to next key in pool...`);
+                scheduleReconnect(600);
+              }
+            }
+          },
+        },
+      });
+
+      // Hot-swap: replace old session with new session
+      const oldSession = peerState.geminiSession;
+      peerState.geminiSession = sessionInstance;
+      peerState.isGeminiReady = true;
+      peerState.isRolloverInProgress = false;
+
+      // Close the previous session cleanly after hot-swap
+      if (oldSession && oldSession !== sessionInstance) {
+        try {
+          oldSession.close();
+        } catch {}
+      }
+
+      log(`[Gemini Ready] Session active for ${role} in ${roomId} (Key #${keyIdx + 1}). Flushing queued chunks (${peerState.audioQueue.length})...`);
+
+      // Flush any chunks queued during connection/rollover
+      while (peerState.audioQueue.length > 0) {
+        const qChunk = peerState.audioQueue.shift();
+        try {
+          sessionInstance.sendRealtimeInput({
+            media: {
+              data: qChunk,
+              mimeType: "audio/pcm;rate=16000",
+            },
+          });
+        } catch (qErr) {
+          log(`[Queue Send Error] ${qErr.message}`);
+        }
+      }
+
+      // Proactive 8-minute rollover timer (safely before Google's 10-minute hard cutoff)
+      if (peerState.rolloverTimer) clearTimeout(peerState.rolloverTimer);
+      peerState.rolloverTimer = setTimeout(() => {
+        log(`[Gemini Proactive Rollover (${role})] 8-minute window reached. Pre-emptively rolling over to next key...`);
+        triggerSeamlessRollover("proactive-8min");
+      }, 8 * 60 * 1000); // 8 minutes
+
+      // Notify client on initial connect
+      if (!isRollover && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ready", model: EXACT_MODEL }));
+      }
+    } catch (gErr) {
+      log(`[Gemini Connect Failed (${role})] ${gErr.message}`);
+      peerState.isRolloverInProgress = false;
+      if (!peerState.isDestroyed && ws.readyState === WebSocket.OPEN) {
+        scheduleReconnect(1500);
       }
     }
-
-    // Now notify client that the agent worker is 100% ready for incoming audio
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "ready", model: EXACT_MODEL }));
-    }
-  } catch (gErr) {
-    log(`[Gemini Connection Failed (${role})] ${gErr.message}`);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "gemini_error", error: gErr.message }));
-    }
   }
+
+  function triggerSeamlessRollover(reason = "timer") {
+    if (peerState.isRolloverInProgress || peerState.isDestroyed) return;
+    peerState.isRolloverInProgress = true;
+    log(`[Rollover Triggered] ${role} in ${roomId} (reason: ${reason})`);
+    // Connect next session in background while current session still handles audio
+    connectGemini(true);
+  }
+
+  function scheduleReconnect(delayMs = 1000) {
+    if (peerState.reconnectTimer) clearTimeout(peerState.reconnectTimer);
+    if (peerState.isDestroyed) return;
+    peerState.reconnectTimer = setTimeout(() => {
+      connectGemini(false);
+    }, delayMs);
+  }
+
+  // Initial connection
+  connectGemini(false);
 
   // Handle incoming audio from client
   ws.on("message", (data, isBinary) => {
@@ -337,7 +426,7 @@ wss.on("connection", async (ws, req) => {
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
       const base64 = buf.toString("base64");
 
-      if (isGeminiReady && peerState.geminiSession) {
+      if (peerState.isGeminiReady && peerState.geminiSession) {
         try {
           peerState.geminiSession.sendRealtimeInput({
             media: {
@@ -349,9 +438,9 @@ wss.on("connection", async (ws, req) => {
           log(`[Send Error (${role})] ${err.message}`);
         }
       } else {
-        // Queue if Gemini session is still connecting
-        if (audioQueue.length < 200) {
-          audioQueue.push(base64);
+        // Queue chunks during rollover/reconnect window
+        if (peerState.audioQueue.length < 250) {
+          peerState.audioQueue.push(base64);
         }
       }
     } else {
@@ -360,6 +449,8 @@ wss.on("connection", async (ws, req) => {
         const msg = JSON.parse(data.toString());
         if (msg.type === "ping") {
           ws.send(JSON.stringify({ type: "pong", time: Date.now() }));
+        } else if (msg.type === "pong") {
+          // Client responded to our heartbeat
         }
       } catch {}
     }
@@ -367,6 +458,11 @@ wss.on("connection", async (ws, req) => {
 
   ws.on("close", () => {
     log(`[WebSocket Disconnected] ${role} in ${roomId} (chunks in: ${peerState.audioChunksReceived}, forwarded: ${peerState.audioChunksForwarded})`);
+    peerState.isDestroyed = true;
+    clearInterval(heartbeatTimer);
+    if (peerState.rolloverTimer) clearTimeout(peerState.rolloverTimer);
+    if (peerState.reconnectTimer) clearTimeout(peerState.reconnectTimer);
+
     if (peerState.geminiSession) {
       try {
         peerState.geminiSession.close();
@@ -384,7 +480,7 @@ wss.on("connection", async (ws, req) => {
 server.listen(PORT, "0.0.0.0", () => {
   log(`[HTTP Server] Health listening on http://0.0.0.0:${PORT}`);
   log(`[WebSocket Server] Live stream listening on ws://0.0.0.0:${PORT}/live-stream`);
-  log("[Worker Status] DIRECT CLOUD PIPELINE ACTIVE (Zero Double-Hop) 🚀\n");
+  log("[Worker Status] DIRECT CLOUD PIPELINE ACTIVE (Zero Double-Hop & Seamless Key Rollover) 🚀\n");
 });
 
 // Graceful shutdown
