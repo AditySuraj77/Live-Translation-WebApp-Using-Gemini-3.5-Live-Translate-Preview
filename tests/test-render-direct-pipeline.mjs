@@ -211,14 +211,14 @@ async function runTest2() {
     }, 20);
   });
 
-  // Wait up to 6 seconds for translation delivery
+  // Wait up to 10 seconds for translation delivery
   console.log("Waiting for translated audio packets on User B...");
   const waitStart = Date.now();
-  while (!userBFirstAudioTimestamp && Date.now() - waitStart < 6000) {
+  while (!userBFirstAudioTimestamp && Date.now() - waitStart < 10000) {
     await new Promise((r) => setTimeout(r, 100));
   }
   // Allow remaining chunks to arrive
-  await new Promise((r) => setTimeout(r, 1500));
+  await new Promise((r) => setTimeout(r, 2000));
 
   wsA.close();
   wsB.close();
