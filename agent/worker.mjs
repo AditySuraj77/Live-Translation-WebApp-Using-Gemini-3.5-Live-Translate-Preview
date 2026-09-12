@@ -192,11 +192,13 @@ wss.on("connection", async (ws, req) => {
           const rawMsg = msg;
 
           // 1. Output transcription (subtitles)
+          let captionEmitted = false;
           const outputText =
             rawMsg.serverContent?.outputTranscription?.text ||
             rawMsg.serverContent?.output_transcription?.text;
           if (outputText) {
             log(`[Subtitle (${role})] ${outputText}`);
+            captionEmitted = true;
             const captionPayload = JSON.stringify({ type: "caption", text: outputText, from: role });
             if (ws.readyState === WebSocket.OPEN) ws.send(captionPayload);
             const currentRoom = rooms.get(roomId);
@@ -233,7 +235,7 @@ wss.on("connection", async (ws, req) => {
                   log(`[Forward Warn] Partner ${partnerKey} not available or socket closed!`);
                 }
               }
-              if (part.text) {
+              if (part.text && !captionEmitted) {
                 const textPayload = JSON.stringify({ type: "caption", text: part.text, from: role });
                 if (ws.readyState === WebSocket.OPEN) ws.send(textPayload);
                 const currentRoom = rooms.get(roomId);
@@ -242,6 +244,27 @@ wss.on("connection", async (ws, req) => {
                   partner.ws.send(textPayload);
                 }
               }
+            }
+          }
+
+          // 3. Turn complete & interruption signals (resets subtitle accumulation cleanly)
+          if (rawMsg.serverContent?.turnComplete) {
+            const turnPayload = JSON.stringify({ type: "turn_complete", from: role });
+            if (ws.readyState === WebSocket.OPEN) ws.send(turnPayload);
+            const currentRoom = rooms.get(roomId);
+            const partner = currentRoom ? currentRoom[partnerKey] : null;
+            if (partner && partner.ws.readyState === WebSocket.OPEN) {
+              partner.ws.send(turnPayload);
+            }
+          }
+
+          if (rawMsg.serverContent?.interrupted) {
+            const interruptedPayload = JSON.stringify({ type: "interrupted", from: role });
+            if (ws.readyState === WebSocket.OPEN) ws.send(interruptedPayload);
+            const currentRoom = rooms.get(roomId);
+            const partner = currentRoom ? currentRoom[partnerKey] : null;
+            if (partner && partner.ws.readyState === WebSocket.OPEN) {
+              partner.ws.send(interruptedPayload);
             }
           }
 

@@ -208,7 +208,7 @@ test.describe("VoxLive Room & Lobby E2E Verification", () => {
 
     // Guest leaves by clicking Leave button
     await guestPage.locator('button:has-text("Leave")').click();
-    await guestPage.waitForURL((url) => url.pathname === "/", { timeout: 15000 });
+    await guestPage.waitForURL((url: URL) => url.pathname === "/", { timeout: 15000 });
 
     // Verify Lobby drops back to 1/2 Waiting
     const lobbyContext = await newAudioContext(browser);
@@ -220,7 +220,7 @@ test.describe("VoxLive Room & Lobby E2E Verification", () => {
 
     // Host leaves
     await hostPage.locator('button:has-text("Leave")').click();
-    await hostPage.waitForURL((url) => url.pathname === "/", { timeout: 15000 });
+    await hostPage.waitForURL((url: URL) => url.pathname === "/", { timeout: 15000 });
 
     // Verify room is deleted from lobby
     await lobbyPage.reload();

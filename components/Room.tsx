@@ -134,6 +134,8 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
 
   const myTranscriptTimerRef = useRef<NodeJS.Timeout | null>(null);
   const peerTranscriptTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isMyNewUtteranceRef = useRef<boolean>(true);
+  const isPeerNewUtteranceRef = useRef<boolean>(true);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const geminiRef = useRef<GeminiLiveSession | null>(null);
@@ -200,6 +202,14 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     if (tokenRefreshTimerRef.current) {
       clearTimeout(tokenRefreshTimerRef.current);
       tokenRefreshTimerRef.current = null;
+    }
+    if (myTranscriptTimerRef.current) {
+      clearTimeout(myTranscriptTimerRef.current);
+      myTranscriptTimerRef.current = null;
+    }
+    if (peerTranscriptTimerRef.current) {
+      clearTimeout(peerTranscriptTimerRef.current);
+      peerTranscriptTimerRef.current = null;
     }
     freshTokenRef.current = null;
     geminiRef.current?.disconnect();
@@ -399,10 +409,59 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             try {
               const data = JSON.parse(evt.data);
               if (data.type === "caption" && data.text) {
+                const cleanText = data.text.trim();
+                if (!cleanText) return;
+
                 if (data.from === role) {
-                  setLastTranscript((prev) => (prev ? `${prev} ${data.text}` : data.text).slice(-300));
+                  setLastTranscript((prev) => {
+                    if (!prev || isMyNewUtteranceRef.current) {
+                      isMyNewUtteranceRef.current = false;
+                      return cleanText;
+                    }
+                    return `${prev} ${cleanText}`.slice(-130);
+                  });
+
+                  if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
+                  myTranscriptTimerRef.current = setTimeout(() => {
+                    setLastTranscript("");
+                    isMyNewUtteranceRef.current = true;
+                  }, 3500);
                 } else {
-                  setPeerTranscript((prev) => (prev ? `${prev} ${data.text}` : data.text).slice(-300));
+                  setPeerTranscript((prev) => {
+                    if (!prev || isPeerNewUtteranceRef.current) {
+                      isPeerNewUtteranceRef.current = false;
+                      return cleanText;
+                    }
+                    return `${prev} ${cleanText}`.slice(-130);
+                  });
+
+                  if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
+                  peerTranscriptTimerRef.current = setTimeout(() => {
+                    setPeerTranscript("");
+                    isPeerNewUtteranceRef.current = true;
+                  }, 3500);
+                }
+              } else if (data.type === "turn_complete") {
+                if (data.from === role) {
+                  isMyNewUtteranceRef.current = true;
+                  if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
+                  myTranscriptTimerRef.current = setTimeout(() => {
+                    setLastTranscript("");
+                  }, 2800);
+                } else {
+                  isPeerNewUtteranceRef.current = true;
+                  if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
+                  peerTranscriptTimerRef.current = setTimeout(() => {
+                    setPeerTranscript("");
+                  }, 2800);
+                }
+              } else if (data.type === "interrupted") {
+                if (data.from === role) {
+                  setLastTranscript("");
+                  isMyNewUtteranceRef.current = true;
+                } else {
+                  setPeerTranscript("");
+                  isPeerNewUtteranceRef.current = true;
                 }
               } else if (data.type === "audio" && data.data) {
                 const pcm = base64ToArrayBuffer(data.data);
@@ -436,6 +495,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               setIsSpeaking(true);
               if (!lastBroadcastedSpeech) {
                 lastBroadcastedSpeech = true;
+                isMyNewUtteranceRef.current = true;
                 peerRef.current?.sendSpeakingState(true);
               }
               if (speakTimer) clearTimeout(speakTimer);
@@ -488,16 +548,28 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         peer.onPeerSpeaking((speaking) => {
           console.log("[Room] Peer speaking state received over DataChannel:", speaking);
           setIsPeerSpeaking(speaking);
+          if (speaking) {
+            isPeerNewUtteranceRef.current = true;
+          }
         });
 
         // Receive real-time subtitles from peer over DataChannel
         peer.onCaption((captionText) => {
           console.log("[Room] Peer caption received over DataChannel:", captionText);
-          setPeerTranscript((prev) => (prev ? `${prev} ${captionText}` : captionText).slice(-300));
+          const cleanText = captionText.trim();
+          if (!cleanText) return;
+          setPeerTranscript((prev) => {
+            if (!prev || isPeerNewUtteranceRef.current) {
+              isPeerNewUtteranceRef.current = false;
+              return cleanText;
+            }
+            return `${prev} ${cleanText}`.slice(-130);
+          });
           if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
           peerTranscriptTimerRef.current = setTimeout(() => {
             setPeerTranscript("");
-          }, 6000);
+            isPeerNewUtteranceRef.current = true;
+          }, 3500);
         });
 
         // Receive real-time P2P chat messages and files over DataChannel
