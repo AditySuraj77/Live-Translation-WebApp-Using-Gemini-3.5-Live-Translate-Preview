@@ -20,18 +20,6 @@ interface RoomProps {
   role: "caller" | "callee";
 }
 
-const RENDER_AGENT_URL =
-  process.env.NEXT_PUBLIC_RENDER_AGENT_URL || "https://live-translation-agent.onrender.com";
-
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
 interface FriendlyError {
   title: string;
   description: string;
@@ -134,8 +122,6 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
 
   const myTranscriptTimerRef = useRef<NodeJS.Timeout | null>(null);
   const peerTranscriptTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const isMyNewUtteranceRef = useRef<boolean>(true);
-  const isPeerNewUtteranceRef = useRef<boolean>(true);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const geminiRef = useRef<GeminiLiveSession | null>(null);
@@ -147,16 +133,9 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const flushRef = useRef<(() => void) | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const receivingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const nextAudioPlayTimeRef = useRef<number>(0);
-  const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-  const speechHangoverTimerRef = useRef<number>(0);
   const freshTokenRef = useRef<string | null>(null);
   const tokenRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isReconnectingGeminiRef = useRef(false);
-  const renderWsRef = useRef<WebSocket | null>(null);
-  const isDirectAgentActiveRef = useRef(false);
-  const [isDirectAgentActive, setIsDirectAgentActive] = useState(false);
-  const renderConnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load user profile & fetch user geolocation on mount & auto-retry on internet reconnect
   useEffect(() => {
@@ -199,38 +178,10 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     return () => window.removeEventListener("online", onOnline);
   }, [role]);
 
-  const stopAllActiveAudio = useCallback(() => {
-    activeSourcesRef.current.forEach((src) => {
-      try {
-        src.stop();
-        src.disconnect();
-      } catch {}
-    });
-    activeSourcesRef.current.clear();
-    nextAudioPlayTimeRef.current = 0;
-  }, []);
-
   const cleanup = useCallback(() => {
-    stopAllActiveAudio();
-    if (renderWsRef.current) {
-      renderWsRef.current.close();
-      renderWsRef.current = null;
-    }
-    if (renderConnectTimeoutRef.current) {
-      clearTimeout(renderConnectTimeoutRef.current);
-      renderConnectTimeoutRef.current = null;
-    }
     if (tokenRefreshTimerRef.current) {
       clearTimeout(tokenRefreshTimerRef.current);
       tokenRefreshTimerRef.current = null;
-    }
-    if (myTranscriptTimerRef.current) {
-      clearTimeout(myTranscriptTimerRef.current);
-      myTranscriptTimerRef.current = null;
-    }
-    if (peerTranscriptTimerRef.current) {
-      clearTimeout(peerTranscriptTimerRef.current);
-      peerTranscriptTimerRef.current = null;
     }
     freshTokenRef.current = null;
     geminiRef.current?.disconnect();
@@ -239,7 +190,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     micSourceRef.current?.disconnect();
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     audioCtxRef.current?.close();
-  }, [stopAllActiveAudio]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -249,7 +200,11 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         setStatus("connecting");
         const currentProfile = getStoredUserProfile();
 
-        // 1. Client-side Gemini token fetch disabled (100% Render Cloud Agent mode)
+        // 1. Fetch ephemeral auth token from server
+        const tokenRes = await fetch("/api/gemini-token");
+        if (!tokenRes.ok) throw new Error("Could not fetch Gemini authentication token from server");
+        const { token } = await tokenRes.json();
+
         if (cancelled) return;
 
         // 2. Mic permission with echo cancellation and AGC disabled
@@ -390,275 +345,34 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             scheduleRollover();
           }, 24 * 60 * 1000);
         };
+        scheduleRollover();
 
-        // Smart Instant Fallback: If Render agent is cold/offline, seamlessly activate client Gemini Live
-        const startClientGeminiFallback = async () => {
-          if (isDirectAgentActiveRef.current || geminiRef.current?.isConnected() || hasLeftRef.current || cancelled) return;
-          console.log("[Room] ⚡ Initiating Client-Side Gemini Live Fallback (Zero Delay)...");
-          try {
-            let nextToken = freshTokenRef.current;
-            if (!nextToken) {
-              const res = await fetch("/api/gemini-token");
-              if (res.ok) {
-                const data = await res.json();
-                nextToken = data.token;
-              }
-            }
-            if (!nextToken) {
-              throw new Error("Could not acquire Gemini token for client fallback");
-            }
-            freshTokenRef.current = null;
+        const gemini = new GeminiLiveSession(token);
+        geminiRef.current = gemini;
+        attachGeminiEvents(gemini);
 
-            const session = new GeminiLiveSession(nextToken);
-            attachGeminiEvents(session);
-            await session.connect(targetLang.bcp47, myLang.label, targetLang.label);
+        try {
+          await gemini.connect(targetLang.bcp47, myLang.label, targetLang.label);
+          setGeminiConnected(true);
+        } catch (gErr) {
+          console.warn("[Room] Gemini connection initial issue:", gErr);
+        }
 
-            geminiRef.current = session;
-            setGeminiConnected(true);
-            scheduleRollover();
-            console.log("[Room] 🟢 Client-Side Gemini Live Fallback CONNECTED and actively translating!");
-          } catch (fbErr) {
-            console.warn("[Room] ⚠️ Client-Side Gemini Live Fallback attempt error:", fbErr);
-          }
-        };
+        if (cancelled) {
+          gemini.disconnect();
+          return;
+        }
 
-        // Smooth timeline scheduler for incoming PCM audio chunks (gapless, jitter-tolerant)
-        let playbackChunkCounter = 0;
-        const playIncomingPcm = (pcmBytes: ArrayBuffer, sampleRate: number) => {
-          if (!audioCtxRef.current) {
-            console.warn("[Audio Playback] ⚠️ Dropped audio chunk: audioCtxRef is null!");
-            return;
-          }
-
-          playbackChunkCounter++;
-          if (playbackChunkCounter % 15 === 1) {
-            console.log(
-              `[Audio Playback] 🔊 Playing PCM chunk #${playbackChunkCounter} (${pcmBytes.byteLength} bytes @ ${sampleRate}Hz). AudioContext state: "${audioCtxRef.current.state}"`
-            );
-          }
-
-          setIsReceivingAudio(true);
-          if (receivingTimeoutRef.current) clearTimeout(receivingTimeoutRef.current);
-          receivingTimeoutRef.current = setTimeout(() => setIsReceivingAudio(false), 1400);
-
-          const audioBuf = pcmToAudioBuffer(audioCtxRef.current, pcmBytes, sampleRate);
-          if (audioCtxRef.current.state === "suspended") {
-            audioCtxRef.current
-              .resume()
-              .then(() => console.log("[AudioContext] 🟢 Resumed successfully on incoming audio"))
-              .catch((e) => console.warn("[AudioContext] ⚠️ Autoplay resume notice:", e));
-          }
-
-          const now = audioCtxRef.current.currentTime;
-
-          // Gapless Jitter Buffer Scheduling:
-          // If queue was idle (first chunk of an utterance), provide an 80ms jitter cushion.
-          // For consecutive chunks in an active speech stream, stitch them seamlessly at nextAudioPlayTimeRef.current.
-          if (nextAudioPlayTimeRef.current <= now) {
-            nextAudioPlayTimeRef.current = now + 0.08;
-          }
-
-          const startTime = Math.max(now, nextAudioPlayTimeRef.current);
-          const src = audioCtxRef.current.createBufferSource();
-          src.buffer = audioBuf;
-          src.connect(audioCtxRef.current.destination);
-
-          activeSourcesRef.current.add(src);
-          src.onended = () => {
-            activeSourcesRef.current.delete(src);
-          };
-
-          src.start(startTime);
-          nextAudioPlayTimeRef.current = startTime + audioBuf.duration;
-        };
-
-        // Connect to Render Direct Cloud Agent Worker (100% Dedicated Agent Pipeline)
-        const connectRenderAgent = () => {
-          if (hasLeftRef.current || cancelled) return;
-
-          // 3.5s Failover Detector: If Render is cold/spinning up, trigger client fallback without stalling user
-          if (renderConnectTimeoutRef.current) clearTimeout(renderConnectTimeoutRef.current);
-          renderConnectTimeoutRef.current = setTimeout(() => {
-            if (!isDirectAgentActiveRef.current) {
-              console.log("[Agent WS] ⏳ Render Agent not ready within 3.5s. Activating client fallback...");
-              startClientGeminiFallback();
-            }
-          }, 3500);
-
-          try {
-            const wsProto = RENDER_AGENT_URL.startsWith("https") ? "wss:" : "ws:";
-            const cleanHost = RENDER_AGENT_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
-            const streamWsUrl = `${wsProto}//${cleanHost}/live-stream?roomId=${encodeURIComponent(roomId)}&role=${encodeURIComponent(role)}&sourceLang=${encodeURIComponent(myLang.label)}&targetLang=${encodeURIComponent(targetLang.label)}&bcp47=${encodeURIComponent(targetLang.bcp47)}`;
-
-            console.log("[Agent WS] 🔌 Connecting to Translation Agent Worker:", streamWsUrl);
-            const rWs = new WebSocket(streamWsUrl);
-            rWs.binaryType = "arraybuffer";
-            renderWsRef.current = rWs;
-
-            rWs.onopen = () => {
-              console.log("[Agent WS] 🟢 WebSocket connection established to Translation Agent Worker!");
-            };
-
-            rWs.onmessage = (evt) => {
-              try {
-                const data = JSON.parse(evt.data);
-
-                if (data.type === "ready") {
-                  if (renderConnectTimeoutRef.current) {
-                    clearTimeout(renderConnectTimeoutRef.current);
-                    renderConnectTimeoutRef.current = null;
-                  }
-                  isDirectAgentActiveRef.current = true;
-                  setIsDirectAgentActive(true);
-                  setGeminiConnected(true);
-                  console.log("[Agent WS] 🟢 Translation Agent READY! (Model: " + data.model + ")");
-                  // If client fallback was active, cleanly disconnect it to prevent duplicate processing
-                  if (geminiRef.current) {
-                    console.log("[Room] Render agent ready! Disconnecting client fallback session.");
-                    geminiRef.current.disconnect();
-                    geminiRef.current = null;
-                  }
-                  return;
-                }
-
-                if (data.type === "clear_audio" || data.type === "interrupted") {
-                  console.log("[Agent WS] 🛑 Audio interrupted / cleared by server.");
-                  stopAllActiveAudio();
-                  setPeerTranscript("");
-                  isPeerNewUtteranceRef.current = true;
-                  setIsReceivingAudio(false);
-                  return;
-                }
-
-                if (data.type === "peer_muted") {
-                  console.log(`[Agent WS] 🔇 Peer (${data.from}) mute state changed:`, data.muted);
-                  if (data.muted) {
-                    setIsReceivingAudio(false);
-                  }
-                  return;
-                }
-
-                if (data.type === "ping") {
-                  if (rWs.readyState === WebSocket.OPEN) {
-                    rWs.send(JSON.stringify({ type: "pong", time: Date.now() }));
-                  }
-                  return;
-                }
-
-                if (data.type === "caption" && data.text) {
-                  const cleanText = data.text.trim();
-                  if (!cleanText) return;
-                  console.log(`[Agent WS] 💬 Caption received: "${cleanText}" (from: ${data.from})`);
-
-                  if (data.from === role) {
-                    setLastTranscript((prev) => {
-                      if (!prev || isMyNewUtteranceRef.current) {
-                        isMyNewUtteranceRef.current = false;
-                        return cleanText;
-                      }
-                      return `${prev} ${cleanText}`.slice(-130);
-                    });
-
-                    if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
-                    myTranscriptTimerRef.current = setTimeout(() => {
-                      setLastTranscript("");
-                      isMyNewUtteranceRef.current = true;
-                    }, 3500);
-                  } else {
-                    setPeerTranscript((prev) => {
-                      if (!prev || isPeerNewUtteranceRef.current) {
-                        isPeerNewUtteranceRef.current = false;
-                        return cleanText;
-                      }
-                      return `${prev} ${cleanText}`.slice(-130);
-                    });
-
-                    if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
-                    peerTranscriptTimerRef.current = setTimeout(() => {
-                      setPeerTranscript("");
-                      isPeerNewUtteranceRef.current = true;
-                    }, 3500);
-                  }
-                } else if (data.type === "turn_complete") {
-                  console.log("[Agent WS] 🔄 Turn complete from:", data.from);
-                  // Allow already scheduled audio buffers to finish naturally
-                  if (receivingTimeoutRef.current) clearTimeout(receivingTimeoutRef.current);
-                  receivingTimeoutRef.current = setTimeout(() => setIsReceivingAudio(false), 800);
-
-                  if (data.from === role) {
-                    isMyNewUtteranceRef.current = true;
-                    if (myTranscriptTimerRef.current) clearTimeout(myTranscriptTimerRef.current);
-                    myTranscriptTimerRef.current = setTimeout(() => {
-                      setLastTranscript("");
-                    }, 2800);
-                  } else {
-                    isPeerNewUtteranceRef.current = true;
-                    if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
-                    peerTranscriptTimerRef.current = setTimeout(() => {
-                      setPeerTranscript("");
-                    }, 2800);
-                  }
-                } else if (data.type === "audio" && data.data) {
-                  console.log("[Agent WS] 🔊 Received translated audio packet! Base64 size:", data.data.length, "MIME:", data.mimeType);
-                  const pcm = base64ToArrayBuffer(data.data);
-                  const mime = data.mimeType || "";
-                  const m = mime.match(/rate=(\d+)/);
-                  const rate = m ? parseInt(m[1], 10) : 24000;
-                  playIncomingPcm(pcm, rate);
-                }
-              } catch (err) {
-                console.error("[Agent WS] Error handling WebSocket message:", err);
-              }
-            };
-
-            rWs.onerror = (e) => {
-              console.error("[Agent WS] ❌ WebSocket error:", e);
-              if (!isDirectAgentActiveRef.current) {
-                startClientGeminiFallback();
-              }
-            };
-
-            rWs.onclose = (e) => {
-              console.warn(`[Agent WS] ⚠️ WebSocket closed. Code: ${e.code}, Reason: "${e.reason}"`);
-              isDirectAgentActiveRef.current = false;
-              setIsDirectAgentActive(false);
-              stopAllActiveAudio();
-              if (!hasLeftRef.current && !cancelled) {
-                // Instantly kick off client fallback if Render closed or sleeping
-                startClientGeminiFallback();
-                console.log("[Agent WS] Reconnecting to Translation Agent in 3s...");
-                setTimeout(connectRenderAgent, 3000);
-              }
-            };
-          } catch (e) {
-            console.error("[Agent WS] ❌ Could not initialize Translation Agent WebSocket:", e);
-            startClientGeminiFallback();
-            if (!hasLeftRef.current && !cancelled) {
-              setTimeout(connectRenderAgent, 3000);
-            }
-          }
-        };
-
-        connectRenderAgent();
-
-        // 6. Route mic worklet chunks -> Dedicated Translation Agent Worker (or Client Fallback)
+        // 6. Route mic worklet chunks -> Gemini Live API & broadcast instant speech state
         let speakTimer: NodeJS.Timeout | null = null;
         let lastBroadcastedSpeech = false;
-        let chunkSendCounter = 0;
-        let lastSpeechTime = 0;
 
         workletNode.port.onmessage = (evt) => {
           if (evt.data?.type === "audio" && !mutedRef.current) {
-            const isSpeech = Boolean(evt.data.isSpeech);
-            const now = Date.now();
-
-            // Visualizer & turn-taking speaking indicator
-            if (isSpeech) {
-              lastSpeechTime = now;
+            if (evt.data.isSpeech) {
               setIsSpeaking(true);
               if (!lastBroadcastedSpeech) {
                 lastBroadcastedSpeech = true;
-                isMyNewUtteranceRef.current = true;
                 peerRef.current?.sendSpeakingState(true);
               }
               if (speakTimer) clearTimeout(speakTimer);
@@ -666,29 +380,10 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
                 setIsSpeaking(false);
                 lastBroadcastedSpeech = false;
                 peerRef.current?.sendSpeakingState(false);
-              }, 400);
+              }, 350);
             }
 
-            // Gated audio streaming: Only stream while actively speaking or during 350ms natural speech tail.
-            // This stops streaming continuous room fan noise/silence to Gemini,
-            // allowing Gemini's server-side VAD to detect phrase boundaries immediately (<400ms)!
-            const shouldStream = isSpeech || (now - lastSpeechTime < 350);
-
-            if (shouldStream) {
-              const ws = renderWsRef.current;
-              if (isDirectAgentActiveRef.current && ws && ws.readyState === WebSocket.OPEN) {
-                chunkSendCounter++;
-                if (chunkSendCounter % 50 === 1) {
-                  console.log(
-                    `[AudioWorklet ➔ Agent WS] Streaming audio chunk #${chunkSendCounter} (${evt.data.buffer.byteLength} bytes). Speaking: ${isSpeech}`
-                  );
-                }
-                ws.send(evt.data.buffer);
-              } else if (geminiRef.current?.isConnected()) {
-                // Mode B: Client-side direct fallback active (Zero delay)
-                geminiRef.current.sendAudioChunk(evt.data.buffer);
-              }
-            }
+            geminiRef.current?.sendAudioChunk(evt.data.buffer);
           }
         };
 
@@ -727,28 +422,16 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         peer.onPeerSpeaking((speaking) => {
           console.log("[Room] Peer speaking state received over DataChannel:", speaking);
           setIsPeerSpeaking(speaking);
-          if (speaking) {
-            isPeerNewUtteranceRef.current = true;
-          }
         });
 
         // Receive real-time subtitles from peer over DataChannel
         peer.onCaption((captionText) => {
           console.log("[Room] Peer caption received over DataChannel:", captionText);
-          const cleanText = captionText.trim();
-          if (!cleanText) return;
-          setPeerTranscript((prev) => {
-            if (!prev || isPeerNewUtteranceRef.current) {
-              isPeerNewUtteranceRef.current = false;
-              return cleanText;
-            }
-            return `${prev} ${cleanText}`.slice(-130);
-          });
+          setPeerTranscript((prev) => (prev ? `${prev} ${captionText}` : captionText).slice(-300));
           if (peerTranscriptTimerRef.current) clearTimeout(peerTranscriptTimerRef.current);
           peerTranscriptTimerRef.current = setTimeout(() => {
             setPeerTranscript("");
-            isPeerNewUtteranceRef.current = true;
-          }, 3500);
+          }, 6000);
         });
 
         // Receive real-time P2P chat messages and files over DataChannel
@@ -884,18 +567,6 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
 
     if (newMuted) {
       setIsSpeaking(false);
-      setIsReceivingAudio(false);
-      if (receivingTimeoutRef.current) {
-        clearTimeout(receivingTimeoutRef.current);
-        receivingTimeoutRef.current = null;
-      }
-      if (renderWsRef.current && renderWsRef.current.readyState === WebSocket.OPEN) {
-        renderWsRef.current.send(JSON.stringify({ type: "mute", muted: true }));
-      }
-    } else {
-      if (renderWsRef.current && renderWsRef.current.readyState === WebSocket.OPEN) {
-        renderWsRef.current.send(JSON.stringify({ type: "mute", muted: false }));
-      }
     }
 
     // Physically pause/resume mic stream at hardware/browser level
@@ -1041,22 +712,6 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             <div className="flex flex-wrap sm:flex-nowrap justify-between items-center gap-2 pb-3 border-b border-gray-800">
               <span className="text-xs text-gray-400 font-medium">Session Status</span>
               <div className="flex items-center gap-2.5">
-                {isDirectAgentActive ? (
-                  <span className="px-2 py-0.5 rounded-md bg-indigo-950/90 border border-indigo-500/40 text-indigo-300 font-mono text-[11px] font-semibold flex items-center gap-1 shadow-sm" title="Zero Double-Hop Cloud Translation Active">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-                    Direct Cloud Pipeline (Render)
-                  </span>
-                ) : geminiConnected ? (
-                  <span className="px-2 py-0.5 rounded-md bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 font-mono text-[11px] font-semibold flex items-center gap-1 shadow-sm" title="Client Direct Live Translation Active">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    Direct Gemini Backup
-                  </span>
-                ) : (
-                  <span className="px-2 py-0.5 rounded-md bg-amber-950/90 border border-amber-500/40 text-amber-300 font-mono text-[11px] font-semibold flex items-center gap-1 shadow-sm" title="Connecting to Render Agent Worker">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                    Connecting Cloud Agent…
-                  </span>
-                )}
                 {status === "connected" && (
                   <span className="px-2 py-0.5 rounded-md bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 font-mono text-xs font-semibold flex items-center gap-1.5 shadow-sm">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
