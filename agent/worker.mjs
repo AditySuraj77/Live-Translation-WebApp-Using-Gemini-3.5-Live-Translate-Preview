@@ -79,6 +79,16 @@ const rooms = new Map();
 // 3. HTTP Server (Health Checks & Real-Time Logs)
 // ─────────────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
+  // Allow cross-origin health pre-warming from web client
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   if (req.url === "/health" || req.url === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
@@ -146,12 +156,10 @@ wss.on("connection", async (ws, req) => {
     partnerKey,
     audioChunksReceived: 0,
     audioChunksForwarded: 0,
-    resumptionHandle: null,
     rolloverTimer: null,
     isRolloverInProgress: false,
     reconnectTimer: null,
     isDestroyed: false,
-    audioQueue: [],
     isGeminiReady: false,
     activeKeyIndex: -1,
   };
@@ -201,6 +209,9 @@ wss.on("connection", async (ws, req) => {
       translationConfig: {
         targetLanguageCode: targetBcp47,
         echoTargetLanguage: false,
+      },
+      contextWindowCompression: {
+        slidingWindow: {},
       },
       outputAudioTranscription: {},
     };
@@ -345,22 +356,7 @@ wss.on("connection", async (ws, req) => {
         } catch {}
       }
 
-      log(`[Gemini Ready] Session active for ${role} in ${roomId} (Key #${keyIdx + 1}). Flushing queued chunks (${peerState.audioQueue.length})...`);
-
-      // Flush any chunks queued during connection/rollover
-      while (peerState.audioQueue.length > 0) {
-        const qChunk = peerState.audioQueue.shift();
-        try {
-          sessionInstance.sendRealtimeInput({
-            media: {
-              data: qChunk,
-              mimeType: "audio/pcm;rate=16000",
-            },
-          });
-        } catch (qErr) {
-          log(`[Queue Send Error] ${qErr.message}`);
-        }
-      }
+      log(`[Gemini Ready] Stateless real-time session active for ${role} in ${roomId} (Key #${keyIdx + 1}). Zero memory/buffering active.`);
 
       // Proactive 8-minute rollover timer (safely before Google's 10-minute hard cutoff)
       if (peerState.rolloverTimer) clearTimeout(peerState.rolloverTimer);
@@ -419,11 +415,6 @@ wss.on("connection", async (ws, req) => {
         } catch (err) {
           log(`[Send Error (${role})] ${err.message}`);
         }
-      } else {
-        // Queue chunks during rollover/reconnect window
-        if (peerState.audioQueue.length < 250) {
-          peerState.audioQueue.push(base64);
-        }
       }
     } else {
       // JSON control message
@@ -434,11 +425,16 @@ wss.on("connection", async (ws, req) => {
         } else if (msg.type === "pong") {
           // Client responded to our heartbeat
         } else if (msg.type === "clear") {
-          peerState.audioQueue = [];
           const currentRoom = rooms.get(roomId);
           const partner = currentRoom ? currentRoom[partnerKey] : null;
           if (partner && partner.ws.readyState === WebSocket.OPEN) {
             partner.ws.send(JSON.stringify({ type: "clear_audio" }));
+          }
+        } else if (msg.type === "mute") {
+          const currentRoom = rooms.get(roomId);
+          const partner = currentRoom ? currentRoom[partnerKey] : null;
+          if (partner && partner.ws.readyState === WebSocket.OPEN) {
+            partner.ws.send(JSON.stringify({ type: "peer_muted", from: role, muted: Boolean(msg.muted) }));
           }
         }
       } catch {}

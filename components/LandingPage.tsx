@@ -64,13 +64,18 @@ export default function LandingPage() {
   const [joinMyLang, setJoinMyLang] = useState("en");
   const [joinTargetLang, setJoinTargetLang] = useState("hi");
 
-  // Load profile on mount
+  // Load profile on mount & pre-warm translation agent
   useEffect(() => {
     const current = getStoredUserProfile();
     setProfile(current);
     setEditName(current.name);
     setEditAvatar(current.avatar);
     setEditColor(current.color || "indigo");
+
+    // Pre-warm the translation cloud agent in the background to eliminate cold boot delay
+    const agentUrl = process.env.NEXT_PUBLIC_RENDER_AGENT_URL || "https://live-translation-agent.onrender.com";
+    const healthUrl = `${agentUrl.replace(/\/$/, "")}/health`;
+    fetch(healthUrl, { method: "GET", mode: "no-cors" }).catch(() => {});
   }, []);
 
   function handleSaveProfile() {
@@ -154,8 +159,12 @@ export default function LandingPage() {
     setShowCreateModal(false);
     fetchRooms(true);
 
-    const newTab = window.open(roomUrl, "_blank");
-    if (!newTab) {
+    try {
+      const newTab = window.open(roomUrl, "_blank");
+      if (!newTab || newTab.closed || typeof newTab.closed === "undefined") {
+        router.push(roomUrl);
+      }
+    } catch {
       router.push(roomUrl);
     }
   }
@@ -168,8 +177,12 @@ export default function LandingPage() {
     const guestTargetLang = room.hostLang;
     const roomUrl = `/room/${room.id}?myLang=${guestMyLang}&targetLang=${guestTargetLang}&role=callee`;
 
-    const newTab = window.open(roomUrl, "_blank");
-    if (!newTab) {
+    try {
+      const newTab = window.open(roomUrl, "_blank");
+      if (!newTab || newTab.closed || typeof newTab.closed === "undefined") {
+        router.push(roomUrl);
+      }
+    } catch {
       router.push(roomUrl);
     }
   }
@@ -193,8 +206,12 @@ export default function LandingPage() {
     const roomUrl = `/room/${id}?myLang=${finalMyLang}&targetLang=${finalTargetLang}&role=callee`;
     setShowManualJoin(false);
 
-    const newTab = window.open(roomUrl, "_blank");
-    if (!newTab) {
+    try {
+      const newTab = window.open(roomUrl, "_blank");
+      if (!newTab || newTab.closed || typeof newTab.closed === "undefined") {
+        router.push(roomUrl);
+      }
+    } catch {
       router.push(roomUrl);
     }
   }

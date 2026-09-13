@@ -88,7 +88,7 @@ class AudioProcessor extends AudioWorkletProcessor {
         sumSq += chunk[i] * chunk[i];
       }
       const rms = Math.sqrt(sumSq / chunk.length);
-      const isSpeech = rms >= 0.006;
+      const isSpeech = rms >= 0.0025;
 
       // Convert Float32 directly to Int16 PCM without hard-cutting samples to zeros
       // This allows Gemini Live native VAD to follow continuous Hindi/English speech natural pauses
