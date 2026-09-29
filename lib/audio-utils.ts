@@ -44,7 +44,6 @@ export function createTranslatedMediaStream(ctx: AudioContext): {
 } {
   const dest = ctx.createMediaStreamDestination();
   let nextPlayTime = 0;
-  const JITTER_BUFFER_SEC = 0.02; // 20ms ultra-low jitter buffer for immediate playback
   const activeSources = new Set<AudioBufferSourceNode>();
 
   function enqueue(buf: AudioBuffer) {
@@ -61,9 +60,16 @@ export function createTranslatedMediaStream(ctx: AudioContext): {
     };
 
     const now = ctx.currentTime;
-    // If queue was empty or fell behind, start with minimal lead time (40ms)
+    // Seamless continuous playback:
+    // If the queue fell behind real time or was idle, start with minimal safety lead (8ms)
+    // 8ms prevents audio boundary pops while ensuring zero audible silence gap.
     if (nextPlayTime <= now) {
-      nextPlayTime = now + JITTER_BUFFER_SEC;
+      nextPlayTime = now + 0.008;
+    } else if (nextPlayTime - now > 0.35) {
+      // Catch-up anti-drift guard:
+      // If bursts of audio pushed queue more than 350ms ahead, clamp it
+      // so translation latency does NOT accumulate into seconds of delay!
+      nextPlayTime = now + 0.05;
     }
 
     src.start(nextPlayTime);

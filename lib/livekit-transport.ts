@@ -93,19 +93,25 @@ export class LiveKitPeerManager {
     // 2. Data packets (Subtitles, Speaking indicator, Chat, Profile, Location)
     this.room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
       try {
+        // Limit incoming data packets to 1MB to prevent DoS
+        if (payload.byteLength > 1_048_576) {
+          console.warn("[LiveKit] Dropped oversized data packet:", payload.byteLength);
+          return;
+        }
         const str = new TextDecoder().decode(payload);
-        const data = JSON.parse(str);
+        const data = JSON.parse(str) as Record<string, unknown>;
+        const msgType = typeof data.type === 'string' ? data.type : '';
 
-        if (data.type === "caption" && data.text) {
+        if (msgType === "caption" && typeof data.text === 'string') {
           this._onCaption?.(data.text);
-        } else if (data.type === "speaking") {
+        } else if (msgType === "speaking") {
           this._onPeerSpeaking?.(Boolean(data.isSpeaking));
-        } else if (data.type === "chat" && data.payload) {
-          this._onChatMessage?.(data.payload);
-        } else if (data.type === "location" && data.location) {
-          this._onPeerLocation?.(data.location);
-        } else if (data.type === "profile" && data.profile) {
-          this._onPeerProfile?.(data.profile);
+        } else if (msgType === "chat" && data.payload) {
+          this._onChatMessage?.(data.payload as ChatMessagePayload);
+        } else if (msgType === "location" && data.location) {
+          this._onPeerLocation?.(data.location as UserLocation);
+        } else if (msgType === "profile" && data.profile) {
+          this._onPeerProfile?.(data.profile as UserProfileInfo);
         }
       } catch (err) {
         console.warn("[LiveKit] Error parsing data packet:", err);
@@ -226,7 +232,7 @@ export class LiveKitPeerManager {
       await this.room.localParticipant.publishTrack(audioTrack, {
         name: "translated-audio",
         source: Track.Source.Microphone,
-        dtx: true,
+        dtx: false, // Disabled: prevents WebRTC from chopping audio during speech pauses
         red: true,
       });
       console.log(`[LiveKit (${this.role})] Published translated audio track!`);

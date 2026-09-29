@@ -22,16 +22,17 @@ export async function GET(req: NextRequest) {
     if (redis) {
       try {
         if (role === "callee") {
-          const occRaw = await redis.get(`room:${roomName}:occupants`);
-          const currentOccupants = Number(occRaw) || 0;
-          if (currentOccupants >= 2) {
+          const newCount = await redis.incr(`room:${roomName}:occupants`);
+          if (newCount > 2) {
+            // Roll back the increment since room is full
+            await redis.decr(`room:${roomName}:occupants`);
             return NextResponse.json(
               { error: "Room is full (maximum 2 participants allowed)", code: "ROOM_FULL" },
               { status: 403 }
             );
           }
-          // Set occupants to 2 so lobby immediately updates to 2/2 Full
-          await redis.set(`room:${roomName}:occupants`, 2, { ex: 21600 });
+          // Set TTL on the key
+          await redis.expire(`room:${roomName}:occupants`, 21600);
         } else if (role === "caller") {
           // Ensure caller has at least 1 occupant recorded
           const occRaw = await redis.get(`room:${roomName}:occupants`);

@@ -1,29 +1,50 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 
 export const dynamic = "force-dynamic";
 
 // Helper: Collect all configured Gemini API keys from environment variables
+let hasLoggedPoolSize = false;
+
 function getGeminiKeyPool(): string[] {
   const keys: string[] = [];
+  const seen = new Set<string>();
 
-  // Primary standard key
-  if (process.env.GEMINI_API_KEY) {
-    keys.push(process.env.GEMINI_API_KEY.trim());
+  const addKey = (val?: string) => {
+    if (!val) return;
+    const trimmed = val.trim();
+    // Valid Google API keys are non-empty strings (at least 20 chars)
+    if (trimmed.length >= 20 && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      keys.push(trimmed);
+    }
+  };
+
+  // 1. Primary standard key (always prioritized first)
+  addKey(process.env.GEMINI_API_KEY);
+
+  // 2. Scan all process.env keys dynamically for custom names and numbered patterns:
+  // - GEMINI_API_KEY_2, GEMINI_API_KEY_3, ...
+  // - liveTranslate_GeminiSecondKey, liveTransalte_GeminiSeventhKey, etc.
+  // - Any environment variable containing 'gemini' and 'key'
+  for (const [envName, envVal] of Object.entries(process.env)) {
+    if (envName === "GEMINI_API_KEY") continue; // already added first
+
+    const lower = envName.toLowerCase();
+    const isGeminiKey =
+      lower.startsWith("gemini_api_key") ||
+      lower.includes("geminikey") ||
+      (lower.includes("livetranslat") && lower.includes("gemini")) ||
+      (lower.includes("gemini") && lower.includes("key"));
+
+    if (isGeminiKey && typeof envVal === "string") {
+      addKey(envVal);
+    }
   }
 
-  // Scan for any multi-pool keys (e.g. liveTranslate_GeminiSecondKey, liveTranslate_GeminiThirdKey, etc.)
-  for (const [envName, envVal] of Object.entries(process.env)) {
-    if (
-      envVal &&
-      envName !== "GEMINI_API_KEY" &&
-      (envName.toLowerCase().includes("gemini") || envName.toLowerCase().startsWith("livetranslat"))
-    ) {
-      const trimmed = envVal.trim();
-      if (trimmed && !keys.includes(trimmed)) {
-        keys.push(trimmed);
-      }
-    }
+  if (!hasLoggedPoolSize && keys.length > 0) {
+    console.log(`[Gemini Token Pool] Successfully loaded ${keys.length} active Gemini API key(s) into failover rotation pool.`);
+    hasLoggedPoolSize = true;
   }
 
   return keys;
@@ -34,7 +55,13 @@ let currentKeyPointer = 0;
 
 // Returns a short-lived ephemeral Gemini authentication token (server-side only).
 // The permanent API keys are never exposed to the client.
-export async function GET() {
+export async function GET(req: NextRequest) {
+  // Basic abuse prevention: verify request originates from our own app
+  const origin = req.headers.get('origin') || req.headers.get('referer') || '';
+  const host = req.headers.get('host') || '';
+  if (origin && !origin.includes(host) && !origin.includes('localhost')) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
   const keyPool = getGeminiKeyPool();
 
   if (keyPool.length === 0) {

@@ -16,6 +16,8 @@ export function getRedis(): Redis | null {
       console.warn("[Redis] Failed to initialize Upstash Redis client:", err);
       return null;
     }
+  } else {
+    console.warn('[Redis] ⚠️ UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not configured. Running in degraded in-memory-only mode. Room state will NOT sync across serverless instances.');
   }
 
   return null;

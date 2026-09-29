@@ -226,8 +226,13 @@ export default function ChatSidebar({
                           </div>
                         </div>
                         <a
-                          href={m.file.dataUrl}
+                          href={m.file.dataUrl && m.file.dataUrl.startsWith('data:') ? m.file.dataUrl : '#'}
                           download={m.file.name}
+                          onClick={(e) => {
+                            if (!m.file?.dataUrl || !m.file.dataUrl.startsWith('data:')) {
+                              e.preventDefault();
+                            }
+                          }}
                           className="bg-white/20 hover:bg-white/30 text-white px-2 py-1 rounded text-[11px] font-bold transition whitespace-nowrap"
                         >
                           ⬇ Save

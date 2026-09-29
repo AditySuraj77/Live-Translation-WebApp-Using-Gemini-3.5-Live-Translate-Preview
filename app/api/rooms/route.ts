@@ -139,6 +139,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing roomId" }, { status: 400 });
     }
 
+    // Validate roomId format: alphanumeric, 2-20 chars
+    const roomIdRegex = /^[A-Za-z0-9_-]{2,20}$/;
+    if (!roomIdRegex.test(id)) {
+      return NextResponse.json(
+        { error: "Invalid room ID. Use 2-20 alphanumeric characters." },
+        { status: 400 }
+      );
+    }
+
     const MAX_CONCURRENT_ROOMS = 20;
     const redis = getRedis();
 

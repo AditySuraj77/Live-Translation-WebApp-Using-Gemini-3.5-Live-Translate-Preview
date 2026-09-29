@@ -86,6 +86,7 @@ export default function ConnectionGlobeModal({
   // Main Three.js Setup and Render Loop
   useEffect(() => {
     if (!isOpen || !containerRef.current) return;
+    let cancelled = false;
 
     const container = containerRef.current;
     const width = container.clientWidth || 400;
@@ -135,7 +136,7 @@ export default function ConnectionGlobeModal({
     const textureLoader = new THREE.TextureLoader();
     const earthTexture = textureLoader.load(
       "/textures/earth.jpg",
-      () => setIsLoaded(true),
+      () => { if (!cancelled) setIsLoaded(true); },
       undefined,
       (err) => console.warn("Failed loading earth texture:", err)
     );
@@ -323,6 +324,7 @@ export default function ConnectionGlobeModal({
 
     // 11. Cleanup on Unmount
     return () => {
+      cancelled = true;
       window.removeEventListener("resize", handleResize);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
 
@@ -344,7 +346,8 @@ export default function ConnectionGlobeModal({
         container.removeChild(renderer.domElement);
       }
     };
-  }, [isOpen, myLocation, peerLocation, focusOnCoordinates]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   // Touch & Mouse Pointer Event Handlers
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {

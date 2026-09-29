@@ -91,7 +91,33 @@ export async function GET(req: NextRequest) {
       }
     }
   } catch (e) {
-    console.warn("[Location API] IP geolocation lookup fallback:", e);
+    console.warn("[Location API] ipapi.co lookup failed:", e);
+  }
+
+  // Second fallback: ip-api.com (free, no key required)
+  try {
+    const controller2 = new AbortController();
+    const timeout2 = setTimeout(() => controller2.abort(), 2500);
+    const res2 = await fetch(`http://ip-api.com/json/${rawIp}?fields=city,country,countryCode,lat,lon`, {
+      signal: controller2.signal,
+      cache: "no-store",
+    });
+    clearTimeout(timeout2);
+    if (res2.ok) {
+      const data2 = await res2.json();
+      if (data2.city && data2.lat && data2.lon) {
+        return NextResponse.json({
+          city: data2.city,
+          country: data2.country,
+          countryCode: data2.countryCode,
+          flag: getCountryFlag(data2.countryCode),
+          lat: data2.lat,
+          lon: data2.lon,
+        });
+      }
+    }
+  } catch (e2) {
+    console.warn("[Location API] ip-api.com fallback also failed:", e2);
   }
 
   // Default fallback

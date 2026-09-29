@@ -11,42 +11,13 @@ import {
 } from "@google/genai";
 
 const PRIMARY_MODEL = "models/gemini-3.5-live-translate-preview";
-const FALLBACK_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025";
 
-function buildPrimaryConfig(
-  targetBcp47: string,
-  sourceLangLabel: string,
-  targetLangLabel: string
-): LiveConnectConfig {
+function buildTranslationConfig(targetBcp47: string): LiveConnectConfig {
   return {
     responseModalities: ["AUDIO" as Modality],
-    systemInstruction: {
-      parts: [
-        {
-          text: `You are an expert real-time simultaneous speech interpreter (like Google Meet Live Translate). The speaker is speaking in ${sourceLangLabel}. Do NOT wait for full sentence completion. Immediately begin translating clause-by-clause or phrase-by-phrase in real-time as words are spoken into natural, fluent ${targetLangLabel}. Start streaming translated audio on the very first meaningful clause. Speak only the clean translated speech in ${targetLangLabel}. Maintain natural prosody and flow. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
-        },
-      ],
-    },
     translationConfig: {
       targetLanguageCode: targetBcp47,
       echoTargetLanguage: false,
-    },
-    outputAudioTranscription: {},
-  };
-}
-
-function buildFallbackConfig(
-  sourceLangLabel: string,
-  targetLangLabel: string
-): LiveConnectConfig {
-  return {
-    responseModalities: ["AUDIO" as Modality],
-    systemInstruction: {
-      parts: [
-        {
-          text: `You are an expert real-time simultaneous speech interpreter (like Google Meet Live Translate). The user is speaking in ${sourceLangLabel}. Do NOT wait for full sentence completion. Immediately begin translating clause-by-clause or phrase-by-phrase in real-time as words are spoken into natural, fluent ${targetLangLabel}. Start streaming translated audio on the very first meaningful clause. Speak only the clean translated speech in ${targetLangLabel}. Maintain natural prosody and flow. Do not add any conversational remarks, explanations, or introductory filler. Translate each phrase once.`,
-        },
-      ],
     },
     outputAudioTranscription: {},
   };
@@ -62,73 +33,42 @@ export class GeminiLiveSession {
   private _onNeedReconnect?: () => void;
   private _onGoAway?: () => void;
   private _onClose?: (code: number, reason: string) => void;
-  private _resumptionHandle: string | null = null;
   private _connected = false;
 
-  constructor(authToken: string, resumptionHandle?: string) {
+  constructor(authToken: string) {
     this._ai = new GoogleGenAI({
       apiKey: authToken,
       httpOptions: { apiVersion: "v1alpha" },
     });
-    if (resumptionHandle) {
-      this._resumptionHandle = resumptionHandle;
-      console.log("[Gemini] Initialized with cached resumption handle:", resumptionHandle);
-    }
   }
 
   async connect(
     targetBcp47: string,
-    sourceLangLabel: string,
-    targetLangLabel: string
+    sourceLangLabel?: string,
+    targetLangLabel?: string
   ): Promise<void> {
-    try {
-      console.log(
-        "[Gemini] Connecting with primary model:",
-        PRIMARY_MODEL,
-        `source: ${sourceLangLabel}, target: ${targetLangLabel} (${targetBcp47})`
-      );
-      await this._connectWithModel(
-        PRIMARY_MODEL,
-        buildPrimaryConfig(targetBcp47, sourceLangLabel, targetLangLabel)
-      );
-      console.log("[Gemini] Connected with primary model:", PRIMARY_MODEL);
-      this._connected = true;
-    } catch (primaryErr) {
-      console.warn("[Gemini] Primary model failed, trying fallback:", primaryErr);
-      try {
-        await this._connectWithModel(
-          FALLBACK_MODEL,
-          buildFallbackConfig(sourceLangLabel, targetLangLabel)
-        );
-        console.log("[Gemini] Connected with fallback model:", FALLBACK_MODEL);
-        this._connected = true;
-      } catch (fallbackErr) {
-        console.error("[Gemini] Fallback model also failed:", fallbackErr);
-        throw fallbackErr;
-      }
-    }
+    console.log(
+      "[Gemini] Connecting directly to Gemini 3.5 Live Translate (Stateless Zero-Memory Stream):",
+      PRIMARY_MODEL,
+      `target: ${targetLangLabel || targetBcp47} (${targetBcp47})`
+    );
+    await this._connectWithModel(
+      PRIMARY_MODEL,
+      buildTranslationConfig(targetBcp47)
+    );
+    console.log("[Gemini] Successfully connected to Gemini 3.5 Live Translate:", PRIMARY_MODEL);
+    this._connected = true;
   }
 
   private async _connectWithModel(
     model: string,
     config: LiveConnectConfig
   ): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const extendedConfig: any = {
-      ...config,
-      contextWindowCompression: {
-        slidingWindow: {},
-      },
-    };
-    if (this._resumptionHandle) {
-      extendedConfig.sessionResumption = { handle: this._resumptionHandle };
-    } else {
-      extendedConfig.sessionResumption = {};
-    }
-
+    // Pure stateless configuration: no contextWindowCompression, no sessionResumption
+    // Prevents model attention bloat and keeps translation latency at absolute minimum
     const session = await this._ai.live.connect({
       model,
-      config: extendedConfig,
+      config,
       callbacks: {
         onopen: () => {
           console.log(`[Gemini Live WebSocket] Open for: ${model}`);
@@ -158,25 +98,24 @@ export class GeminiLiveSession {
   }
 
   private _handleMessage(msg: LiveServerMessage): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rawMsg = msg as any;
+    // Extended fields from Gemini Live API not yet in SDK types
+    const rawMsg = msg as LiveServerMessage & {
+      goAway?: boolean;
+      go_away?: boolean;
+      sessionResumptionUpdate?: { newHandle?: string; handle?: string };
+      session_resumption_update?: { new_handle?: string; handle?: string };
+      data?: string;
+      serverContent?: LiveServerMessage['serverContent'] & {
+        outputTranscription?: { text?: string };
+        output_transcription?: { text?: string };
+      };
+    };
 
     // Check for GoAway signal (server warning 60s before connection expires)
     if (rawMsg.goAway || rawMsg.go_away) {
       console.warn("[Gemini Live] Received GoAway signal from server. Impending close.");
       this._onGoAway?.();
       this._onNeedReconnect?.();
-    }
-
-    // Capture session resumption handle for seamless context continuation
-    const handle =
-      rawMsg.sessionResumptionUpdate?.newHandle ||
-      rawMsg.session_resumption_update?.new_handle ||
-      rawMsg.sessionResumptionUpdate?.handle ||
-      rawMsg.session_resumption_update?.handle;
-    if (handle) {
-      this._resumptionHandle = handle;
-      console.log("[Gemini Live] Session resumption handle updated:", handle);
     }
 
     // Check for interruption signal from server (Barge-in)
@@ -234,8 +173,23 @@ export class GeminiLiveSession {
     }
   }
 
+  /**
+   * Tells Gemini Live that the speaker finished their current utterance.
+   * This triggers immediate translation generation without waiting for 1.5-2s silence timeout!
+   */
+  sendAudioStreamEnd(): void {
+    if (!this._connected || !this._session) return;
+    try {
+      this._session.sendRealtimeInput({
+        audioStreamEnd: true,
+      });
+    } catch {
+      // Quietly ignore send errors during close/reconnect transitions
+    }
+  }
+
   getResumptionHandle(): string | null {
-    return this._resumptionHandle;
+    return null;
   }
 
   onNeedReconnect(cb: () => void): void {

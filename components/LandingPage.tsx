@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { LANGUAGES, findLanguage } from "@/lib/languages";
 import {
@@ -50,6 +50,7 @@ export default function LandingPage() {
   const [loadingRooms, setLoadingRooms] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const refreshTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Create room modal / state
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -103,7 +104,7 @@ export default function LandingPage() {
       console.warn("[Landing] Failed to fetch active rooms:", err);
     } finally {
       setLoadingRooms(false);
-      if (isManual) setTimeout(() => setIsRefreshing(false), 500);
+      if (isManual) refreshTimerRef.current = setTimeout(() => setIsRefreshing(false), 500);
     }
   }, []);
 
@@ -113,7 +114,10 @@ export default function LandingPage() {
     const interval = setInterval(() => {
       fetchRooms();
     }, 4000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
   }, [fetchRooms]);
 
   // Create room handler

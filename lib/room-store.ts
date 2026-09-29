@@ -48,3 +48,23 @@ export function getOrCreateRoom(roomId: string, metadata?: Partial<RoomMetadata>
   }
   return entry;
 }
+
+// Auto-cleanup stale rooms every 5 minutes (in-memory GC)
+const MAX_ROOM_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+function cleanupStaleRooms() {
+  const now = Date.now();
+  for (const [id, entry] of Array.from(roomStore.entries())) {
+    const age = now - (entry.metadata?.createdAt || 0);
+    if (entry.subscribers.size === 0 && age > MAX_ROOM_AGE_MS) {
+      roomStore.delete(id);
+      console.log(`[RoomStore] GC: Removed stale room ${id} (age: ${Math.round(age / 60000)}min)`);
+    }
+  }
+}
+
+// Only run cleanup in server environment
+if (typeof window === 'undefined') {
+  setInterval(cleanupStaleRooms, CLEANUP_INTERVAL_MS);
+}

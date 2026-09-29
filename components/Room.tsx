@@ -102,6 +102,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const [peerLocation, setPeerLocation] = useState<UserLocation | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessagePayload[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   const hasLeftRef = useRef(false);
@@ -136,6 +137,8 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
   const freshTokenRef = useRef<string | null>(null);
   const tokenRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isReconnectingGeminiRef = useRef(false);
+  const speakTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const geminiReconnectRetryRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load user profile & fetch user geolocation on mount & auto-retry on internet reconnect
   useEffect(() => {
@@ -183,6 +186,26 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
       clearTimeout(tokenRefreshTimerRef.current);
       tokenRefreshTimerRef.current = null;
     }
+    if (myTranscriptTimerRef.current) {
+      clearTimeout(myTranscriptTimerRef.current);
+      myTranscriptTimerRef.current = null;
+    }
+    if (peerTranscriptTimerRef.current) {
+      clearTimeout(peerTranscriptTimerRef.current);
+      peerTranscriptTimerRef.current = null;
+    }
+    if (receivingTimeoutRef.current) {
+      clearTimeout(receivingTimeoutRef.current);
+      receivingTimeoutRef.current = null;
+    }
+    if (speakTimerRef.current) {
+      clearTimeout(speakTimerRef.current);
+      speakTimerRef.current = null;
+    }
+    if (geminiReconnectRetryRef.current) {
+      clearTimeout(geminiReconnectRetryRef.current);
+      geminiReconnectRetryRef.current = null;
+    }
     freshTokenRef.current = null;
     geminiRef.current?.disconnect();
     peerRef.current?.close();
@@ -207,12 +230,12 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
 
         if (cancelled) return;
 
-        // 2. Mic permission with echo cancellation and AGC disabled
+        // 2. Mic permission with echo cancellation and AGC enabled for loudspeaker speech
         const micStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
-            autoGainControl: false,
+            autoGainControl: true,
             sampleRate: 16000,
           },
           video: false,
@@ -268,9 +291,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           });
 
           session.onInterrupted(() => {
-            console.log("[Room] Gemini Live Interrupted - Flushing audio queue");
-            flushRef.current?.();
-            setIsReceivingAudio(false);
+            console.log("[Room] Gemini Live Interrupted signal received (barge-in queue flush suppressed for live simultaneous translation)");
           });
 
           session.onError((err) => {
@@ -302,8 +323,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               throw new Error("Could not acquire fresh token for reconnection");
             }
 
-            const prevHandle = geminiRef.current?.getResumptionHandle();
-            const newGemini = new GeminiLiveSession(nextToken, prevHandle || undefined);
+            const newGemini = new GeminiLiveSession(nextToken);
             attachGeminiEvents(newGemini);
 
             await newGemini.connect(targetLang.bcp47, myLang.label, targetLang.label);
@@ -315,7 +335,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             console.log("[Room] Seamless Gemini Live session resumption successful!");
           } catch (reconnErr) {
             console.warn("[Room] Gemini Live reconnection attempt failed, will retry in 3s:", reconnErr);
-            setTimeout(() => {
+            geminiReconnectRetryRef.current = setTimeout(() => {
               isReconnectingGeminiRef.current = false;
               triggerSeamlessReconnect();
             }, 3000);
@@ -329,6 +349,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         const scheduleRollover = () => {
           if (tokenRefreshTimerRef.current) clearTimeout(tokenRefreshTimerRef.current);
           tokenRefreshTimerRef.current = setTimeout(async () => {
+            if (cancelled) return;
             try {
               console.log("[Room] Pre-fetching fresh Gemini auth token in background (24m rollover)...");
               const res = await fetch("/api/gemini-token");
@@ -342,7 +363,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             } catch (err) {
               console.warn("[Room] Background token rollover pre-fetch failed:", err);
             }
-            scheduleRollover();
+            if (!cancelled) scheduleRollover();
           }, 24 * 60 * 1000);
         };
         scheduleRollover();
@@ -363,26 +384,29 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
           return;
         }
 
-        // 6. Route mic worklet chunks -> Gemini Live API & broadcast instant speech state
-        let speakTimer: NodeJS.Timeout | null = null;
+        // 6. Continuous Audio Streaming -> Gemini 3.5 Live Translate (Google Meet style)
+        // No client-side gating or buffering delays: raw 16kHz PCM audio flows continuously and directly
+        // into Google Gemini 3.5's native neural speech translation pipeline.
         let lastBroadcastedSpeech = false;
 
         workletNode.port.onmessage = (evt) => {
           if (evt.data?.type === "audio" && !mutedRef.current) {
+            // UI-only speaking indicator (pure visual feedback, does NOT gate or block audio)
             if (evt.data.isSpeech) {
               setIsSpeaking(true);
               if (!lastBroadcastedSpeech) {
                 lastBroadcastedSpeech = true;
                 peerRef.current?.sendSpeakingState(true);
               }
-              if (speakTimer) clearTimeout(speakTimer);
-              speakTimer = setTimeout(() => {
+              if (speakTimerRef.current) clearTimeout(speakTimerRef.current);
+              speakTimerRef.current = setTimeout(() => {
                 setIsSpeaking(false);
                 lastBroadcastedSpeech = false;
                 peerRef.current?.sendSpeakingState(false);
-              }, 350);
+              }, 400);
             }
 
+            // Continuous, immediate stream directly to Gemini 3.5 Live Translate
             geminiRef.current?.sendAudioChunk(evt.data.buffer);
           }
         };
@@ -408,8 +432,14 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             remoteAudioRef.current.srcObject = remoteStream;
             remoteAudioRef.current
               .play()
-              .then(() => console.log("[Room] Remote audio playback active!"))
-              .catch((e) => console.warn("[Room] Autoplay blocked, click anywhere on screen to enable:", e));
+              .then(() => {
+                console.log("[Room] Remote audio playback active!");
+                setAutoplayBlocked(false);
+              })
+              .catch((e) => {
+                console.warn("[Room] Autoplay blocked, click anywhere on screen to enable:", e);
+                setAutoplayBlocked(true);
+              });
           }
         });
 
@@ -437,7 +467,10 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         // Receive real-time P2P chat messages and files over DataChannel
         peer.onChatMessage((chatMsg) => {
           console.log("[Room] Peer chat message received over DataChannel:", chatMsg);
-          setChatMessages((prev) => [...prev, chatMsg]);
+          setChatMessages((prev) => {
+            const updated = [...prev, chatMsg];
+            return updated.length > 500 ? updated.slice(-500) : updated;
+          });
           setIsChatOpen((open) => {
             if (!open) {
               setUnreadCount((c) => c + 1);
@@ -541,7 +574,7 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
       audioCtxRef.current.resume();
     }
     if (remoteAudioRef.current && remoteAudioRef.current.paused && remoteAudioRef.current.srcObject) {
-      remoteAudioRef.current.play().catch(console.warn);
+      remoteAudioRef.current.play().then(() => setAutoplayBlocked(false)).catch(console.warn);
     }
   };
 
@@ -913,6 +946,13 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
               </div>
             );
           })()}
+
+          {autoplayBlocked && (
+            <div className="bg-amber-950/50 border border-amber-700/60 rounded-xl p-3 w-full max-w-lg sm:max-w-xl md:max-w-2xl text-center text-sm text-amber-300 flex items-center justify-center gap-2 animate-pulse">
+              <span>🔊</span>
+              <span>Tap anywhere on screen to enable translated audio playback</span>
+            </div>
+          )}
 
           {/* Controls Toolbar */}
           <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3 w-full max-w-lg sm:max-w-xl md:max-w-2xl px-1 sm:px-0">
