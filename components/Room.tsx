@@ -412,6 +412,19 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
         };
 
         // 7. Connect via LiveKit Cloud (Ultra-low latency Edge Audio Transport)
+        const sessionKey = `vox_sess_${roomId}_${role}`;
+        let currentSessionId = typeof window !== "undefined" ? sessionStorage.getItem(sessionKey) : null;
+        if (!currentSessionId) {
+          currentSessionId = `${role}_${Math.random().toString(36).substring(2, 9)}`;
+          if (typeof window !== "undefined") {
+            try {
+              sessionStorage.setItem(sessionKey, currentSessionId);
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+
         const peer = new LiveKitPeerManager(
           roomId,
           role,
@@ -419,7 +432,8 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
             name: currentProfile.name,
             avatar: currentProfile.avatar,
             color: currentProfile.color,
-          }
+          },
+          currentSessionId
         );
         peerRef.current = peer;
 
@@ -642,6 +656,9 @@ export default function Room({ roomId, myLangCode, targetLangCode, role }: RoomP
     hasLeftRef.current = true;
 
     try {
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem(`vox_sess_${roomId}_${role}`);
+      }
       fetch("/api/signal/leave", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

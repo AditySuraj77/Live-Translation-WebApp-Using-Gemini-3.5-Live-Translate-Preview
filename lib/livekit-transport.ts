@@ -47,6 +47,7 @@ export class LiveKitPeerManager {
   private role: Role;
   private myProfile?: UserProfileInfo;
   private myLocation?: UserLocation;
+  private sessionId?: string;
   private translatedStream: MediaStream | null = null;
 
   private _onRemoteStream?: (stream: MediaStream) => void;
@@ -61,11 +62,13 @@ export class LiveKitPeerManager {
   constructor(
     roomId: string,
     role: Role,
-    myProfile?: UserProfileInfo
+    myProfile?: UserProfileInfo,
+    sessionId?: string
   ) {
     this.roomId = roomId.toUpperCase();
     this.role = role;
     this.myProfile = myProfile;
+    this.sessionId = sessionId;
 
     this.room = new Room({
       adaptiveStream: true,
@@ -174,10 +177,11 @@ export class LiveKitPeerManager {
     try {
       this._onStatusChange?.("connecting");
       const name = this.myProfile?.name || (this.role === "caller" ? "Host User" : "Guest User");
+      const sessParam = this.sessionId ? `&sessionId=${encodeURIComponent(this.sessionId)}` : "";
       const res = await fetch(
         `/api/livekit-token?roomId=${encodeURIComponent(this.roomId)}&role=${encodeURIComponent(
           this.role
-        )}&name=${encodeURIComponent(name)}`
+        )}&name=${encodeURIComponent(name)}${sessParam}`
       );
 
       if (!res.ok) {

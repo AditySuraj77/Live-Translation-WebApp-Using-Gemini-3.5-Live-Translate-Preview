@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { roomStore, getOrCreateRoom, RoomMetadata } from "@/lib/room-store";
 import { getRedis } from "@/lib/redis";
+import { RoomServiceClient } from "livekit-server-sdk";
 
 export const dynamic = "force-dynamic";
 
@@ -151,19 +152,79 @@ export async function POST(req: NextRequest) {
     const MAX_CONCURRENT_ROOMS = 20;
     const redis = getRedis();
 
-    // Enforce 20 concurrent active rooms limit
+    // Enforce 20 concurrent active rooms limit with zero-quota Lazy Pruning
     if (redis) {
       try {
-        const activeCount = await redis.scard("active_rooms");
+        let activeCount = await redis.scard("active_rooms");
+
         if (activeCount >= MAX_CONCURRENT_ROOMS) {
-          console.warn(`[Rooms API] Room creation blocked: active count (${activeCount}) reached limit of ${MAX_CONCURRENT_ROOMS}`);
-          return NextResponse.json(
-            {
-              error: `All ${MAX_CONCURRENT_ROOMS} call channels are currently active. Please join an existing open room or wait a moment for a slot to free up!`,
-              code: "ROOM_CAP_REACHED",
-            },
-            { status: 429 }
-          );
+          // Lazy Pruning: Check with LiveKit Server SDK if registered rooms are still actually alive
+          const apiKey = process.env.LIVEKIT_API_KEY;
+          const apiSecret = process.env.LIVEKIT_API_SECRET;
+          const wsUrl = process.env.LIVEKIT_URL;
+
+          if (apiKey && apiSecret && wsUrl) {
+            try {
+              const httpUrl = wsUrl.replace("wss://", "https://").replace("ws://", "http://");
+              const roomService = new RoomServiceClient(httpUrl, apiKey, apiSecret);
+              const liveRooms = await roomService.listRooms();
+
+              const registeredRooms: string[] = await redis.smembers("active_rooms");
+              const zombiesToRemove: string[] = [];
+              const now = Date.now();
+
+              for (const rId of registeredRooms) {
+                const liveRoom = liveRooms.find((lr) => lr.name.toUpperCase() === rId.toUpperCase());
+                const isAliveInLivekit = liveRoom && liveRoom.numParticipants > 0;
+
+                if (!isAliveInLivekit) {
+                  // Allow a 3-minute grace period for host to finish loading and joining
+                  const metaRaw = await redis.get(`room:${rId}:meta`);
+                  let isRecent = false;
+                  if (metaRaw) {
+                    try {
+                      const parsed = typeof metaRaw === "string" ? JSON.parse(metaRaw) : metaRaw;
+                      if (parsed.createdAt && now - parsed.createdAt < 3 * 60 * 1000) {
+                        isRecent = true;
+                      }
+                    } catch {
+                      /* ignore */
+                    }
+                  }
+                  if (!isRecent) {
+                    zombiesToRemove.push(rId);
+                  }
+                }
+              }
+
+              if (zombiesToRemove.length > 0) {
+                console.log(`[Rooms API] Lazy Prune: removing ${zombiesToRemove.length} zombie room(s):`, zombiesToRemove);
+                for (const zid of zombiesToRemove) {
+                  await redis.del(
+                    `room:${zid}:meta`,
+                    `room:${zid}:occupants`,
+                    `room:${zid}:guest_session`,
+                    `room:${zid}:caller_session`
+                  );
+                }
+                await redis.srem("active_rooms", ...zombiesToRemove);
+                activeCount = await redis.scard("active_rooms");
+              }
+            } catch (pruneErr) {
+              console.warn("[Rooms API] Lazy pruning warning:", pruneErr);
+            }
+          }
+
+          if (activeCount >= MAX_CONCURRENT_ROOMS) {
+            console.warn(`[Rooms API] Room creation blocked: active count (${activeCount}) reached limit of ${MAX_CONCURRENT_ROOMS}`);
+            return NextResponse.json(
+              {
+                error: `All ${MAX_CONCURRENT_ROOMS} call channels are currently active. Please join an existing open room or wait a moment for a slot to free up!`,
+                code: "ROOM_CAP_REACHED",
+              },
+              { status: 429 }
+            );
+          }
         }
       } catch (cErr) {
         console.warn("[Rooms API] Room count check warning:", cErr);
@@ -192,9 +253,9 @@ export async function POST(req: NextRequest) {
 
     if (redis) {
       try {
-        // Active for up to 6 hours; Pusher channel_vacated webhook deletes it immediately upon exit
-        await redis.set(`room:${uppercaseId}:meta`, JSON.stringify(metadata), { ex: 21600 });
-        await redis.set(`room:${uppercaseId}:occupants`, 1, { ex: 21600 });
+        // Active for up to 15 minutes while waiting for guest (renewed upon call entry)
+        await redis.set(`room:${uppercaseId}:meta`, JSON.stringify(metadata), { ex: 900 });
+        await redis.set(`room:${uppercaseId}:occupants`, 1, { ex: 900 });
         await redis.sadd("active_rooms", uppercaseId);
       } catch (rErr) {
         console.warn("[Rooms API] Redis write warning:", rErr);

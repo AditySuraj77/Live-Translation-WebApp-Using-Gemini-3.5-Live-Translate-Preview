@@ -51,6 +51,8 @@ export async function POST(req: NextRequest) {
         await redis.del(
           `room:${roomName}:meta`,
           `room:${roomName}:occupants`,
+          `room:${roomName}:guest_session`,
+          `room:${roomName}:caller_session`,
           `room:${roomName}:presence:caller`,
           `room:${roomName}:presence:callee`,
           `room:${roomName}:offer`,
@@ -82,6 +84,8 @@ export async function POST(req: NextRequest) {
           await redis.del(
             `room:${roomName}:meta`,
             `room:${roomName}:occupants`,
+            `room:${roomName}:guest_session`,
+            `room:${roomName}:caller_session`,
             `room:${roomName}:presence:caller`,
             `room:${roomName}:presence:callee`,
             `room:${roomName}:offer`,
@@ -104,11 +108,12 @@ export async function POST(req: NextRequest) {
         if (redis) {
           await redis.del(
             `room:${roomName}:presence:callee`,
+            `room:${roomName}:guest_session`,
             `room:${roomName}:answer`,
             `room:${roomName}:ice:callee`,
             `room:${roomName}:profile:callee`
           );
-          await redis.set(`room:${roomName}:occupants`, 1, { ex: 21600 });
+          await redis.set(`room:${roomName}:occupants`, 1, { ex: 900 });
         }
         return NextResponse.json({ ok: true, handled: "guest_left_occupants_reset" });
       }
@@ -120,7 +125,7 @@ export async function POST(req: NextRequest) {
       if (identity.startsWith("callee")) {
         console.log(`[LiveKit Webhook] Guest joined: setting occupants = 2 for ${roomName}`);
         if (redis) {
-          await redis.set(`room:${roomName}:occupants`, 2, { ex: 21600 });
+          await redis.set(`room:${roomName}:occupants`, 2, { ex: 3600 });
         }
       }
     }

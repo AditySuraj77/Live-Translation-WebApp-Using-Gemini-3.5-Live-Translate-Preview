@@ -24,6 +24,8 @@ export async function POST(req: NextRequest) {
           await redis.del(
             `room:${uppercaseId}:meta`,
             `room:${uppercaseId}:occupants`,
+            `room:${uppercaseId}:guest_session`,
+            `room:${uppercaseId}:caller_session`,
             `room:${uppercaseId}:presence:caller`,
             `room:${uppercaseId}:presence:callee`,
             `room:${uppercaseId}:offer`,
@@ -44,12 +46,13 @@ export async function POST(req: NextRequest) {
           console.log(`[Signal Leave] Callee left room ${uppercaseId}. Setting occupants = 1 for Host.`);
           await redis.del(
             `room:${uppercaseId}:presence:callee`,
+            `room:${uppercaseId}:guest_session`,
             `room:${uppercaseId}:answer`,
             `room:${uppercaseId}:ice:callee`,
             `room:${uppercaseId}:profile:callee`
           );
-          await redis.set(`room:${uppercaseId}:occupants`, 1, { ex: 21600 });
-          await redis.expire(`room:${uppercaseId}:meta`, 21600);
+          await redis.set(`room:${uppercaseId}:occupants`, 1, { ex: 900 });
+          await redis.expire(`room:${uppercaseId}:meta`, 900);
           await redis.sadd("active_rooms", uppercaseId);
 
           return NextResponse.json({ ok: true, remaining: 1 });
@@ -59,6 +62,8 @@ export async function POST(req: NextRequest) {
         await redis.del(
           `room:${uppercaseId}:meta`,
           `room:${uppercaseId}:occupants`,
+          `room:${uppercaseId}:guest_session`,
+          `room:${uppercaseId}:caller_session`,
           `room:${uppercaseId}:presence:caller`,
           `room:${uppercaseId}:presence:callee`,
           `room:${uppercaseId}:offer`,
